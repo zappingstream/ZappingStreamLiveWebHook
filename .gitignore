@@ -1,0 +1,29 @@
+## Ignorar carpetas de compilación de .NET
+[Bb]in/
+[Oo]bj/
+
+## Ignorar archivos de usuario y configuraciones locales de Visual Studio / Rider
+.vs/
+.vscode/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+
+## Ignorar archivos de logs
+*.log
+
+## Ignorar herramientas de línea de comandos locales
+.config/dotnet-tools.json
+
+## Ignorar archivos temporales del sistema operativo
+.DS_Store
+Thumbs.db
+
+## =======================================================
+## 🛑 REGLAS DE SEGURIDAD DEL PROYECTO (¡NO TOCAR!) 🛑
+## =======================================================
+
+# Ignora las credenciales locales de la API de YouTube y Firebase
+appsettings.Development.json
+appsettings.Local.json
