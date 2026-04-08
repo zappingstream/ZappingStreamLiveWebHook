@@ -31,7 +31,6 @@ var _youtubeService = new YouTubeService(new BaseClientService.Initializer()
 // Nuestro endpoint que acepta GET y POST
 app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context) =>
 {
-    await ProcesarVideoAsync("kmZGyTgAl8A", "UCvCTWHCbBC0b9UIeLeNs8ug");
     // 1. EL GET: GOOGLE VERIFICANDO QUE EL ENDPOINT EXISTE
     if (context.Request.Method == HttpMethods.Get)
     {
@@ -87,7 +86,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
 {
     try
     {
-        app.Logger.LogInformation("Procesando webhook para VideoId: {VideoId}", videoId);
+        Console.WriteLine("Procesando webhook para VideoId: {VideoId}", videoId);
 
         // 1. Consultar a YouTube sobre el estado de ESTE video
         var videoRequest = _youtubeService.Videos.List("snippet,contentDetails");
@@ -127,6 +126,9 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                 LiveVideoId = videoId, // Guardamos el ID del stream
                 LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
+
+            Console.WriteLine("Canal {ChannelName} empezó a transmitir en vivo vía Webhook.", channelName);
+
         }
         else
         {
@@ -136,12 +138,14 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                 // ¡EL CASO RARO SALVADO! 
                 // El canal está en vivo (con otro ID), pero subieron un Short.
                 // Solo actualizamos la actividad, NO apagamos el stream.
-                app.Logger.LogInformation("Canal en vivo con otro video ({VideoVivoActualId}). El aviso es de otro video ({VideoId}). Solo actualizamos fecha.", videoVivoActualId, videoId);
+                Console.WriteLine("Canal en vivo con otro video ({VideoVivoActualId}). El aviso es de otro video ({VideoId}). Solo actualizamos fecha.", videoVivoActualId, videoId);
 
                 actualizacionParcial = new
                 {
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
+                Console.WriteLine("Canal {ChannelName} actualizado vía Webhook.", channelName);
+
             }
             else
             {
@@ -154,6 +158,8 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                     LiveVideoId = "", // Limpiamos el ID
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
+                Console.WriteLine("Canal {ChannelName} pasó a off el streaming vía Webhook.", channelName);
+
             }
         }
 
@@ -163,11 +169,10 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
             .Child(firebaseKey)
             .PatchAsync(actualizacionParcial);
 
-        app.Logger.LogInformation("Canal {ChannelName} actualizado inteligentemente vía Webhook.", channelName);
     }
     catch (Exception ex)
     {
-        app.Logger.LogError(ex, "Error al procesar el webhook del video {VideoId}", videoId);
+        Console.WriteLine("Error al procesar el webhook del video {VideoId}", videoId);
     }
 }
 string SanitizarKeyFirebase(string key)
