@@ -158,7 +158,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                     LiveVideoId = "", // Limpiamos el ID
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                app.Logger.LogInformatiom("Canal {ChannelName} pasó a off el streaming vía Webhook.", channelName);
+                app.Logger.LogInformation("Canal {ChannelName} pasó a off el streaming vía Webhook.", channelName);
 
             }
         }
