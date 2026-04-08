@@ -97,9 +97,24 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
         var video = videoResponse.Items?.FirstOrDefault();
 
         if (video == null) return;
-
         bool estaEnVivo = video.Snippet?.LiveBroadcastContent == "live";
-        string liveImageUrl = estaEnVivo ?
+
+        // EL FILTRO PARA ESTRENOS:
+        // Los vivos reales devuelven "P0D" (0 days) o "PT0S" (0 seconds) porque no han terminado.
+        // Los estrenos devuelven la duración real del video (ej: "PT15M30S").
+        string duracion = video.ContentDetails.Duration;
+        bool esEstreno = estaEnVivo && duracion != "P0D" && duracion != "PT0S";
+
+        // Tu variable final para saber si es un directo de verdad
+        bool esVivoReal = estaEnVivo && !esEstreno;
+
+        if (!esVivoReal)
+        {
+            // Si no es un vivo real (o sea, es un estreno, un video normal, o está apagado), lo pateamos.
+            return;
+        }
+
+        string liveImageUrl = esVivoReal ?
             (video.Snippet.Thumbnails?.High?.Url ?? video.Snippet.Thumbnails?.Medium?.Url ?? "") : "";
 
         string channelName = video.Snippet.ChannelTitle;
@@ -118,7 +133,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
         // 3. LÓGICA DE ACTUALIZACIÓN INTELIGENTE
         object actualizacionParcial;
 
-        if (estaEnVivo)
+        if (esVivoReal)
         {
             // A. El aviso es de un stream activo. Prendemos todo y guardamos el ID.
             actualizacionParcial = new
