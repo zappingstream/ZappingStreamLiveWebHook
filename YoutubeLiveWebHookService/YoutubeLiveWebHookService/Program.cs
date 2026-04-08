@@ -9,7 +9,7 @@ using System.Xml.Linq;
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-// 1. CORRECCI”N: Usar builder.Configuration
+// 1. CORRECCI√ìN: Usar builder.Configuration
 string firebaseUrl = builder.Configuration["Firebase:Url"] ?? "https://zappingstreaming-default-rtdb.firebaseio.com/";
 string ytApiKey = builder.Configuration["YouTube:ApiKey"] ?? "";
 string firebaseSecret = builder.Configuration["Firebase:Secret"] ?? "";
@@ -36,7 +36,7 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context) 
     {
         if (context.Request.Query.TryGetValue("hub.challenge", out var challenge))
         {
-            app.Logger.LogInformation("SuscripciÛn verificada por Google.");
+            app.Logger.LogInformation("Suscripci√≥n verificada por Google.");
             return Results.Content(challenge, "text/plain");
         }
         return Results.BadRequest("Falta el hub.challenge");
@@ -61,21 +61,21 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context) 
                 string videoId = videoIdElement.Value;
                 string channelId = channelIdElement?.Value;
 
-                app.Logger.LogInformation("°Aviso recibido! Actividad en el video ID: {VideoId} del canal ID: {ChannelId}", videoId, channelId);
+                app.Logger.LogInformation("¬°Aviso recibido! Actividad en el video ID: {VideoId} del canal ID: {ChannelId}", videoId, channelId);
 
                 await ProcesarVideoAsync(videoId, channelId);
             }
         }
         catch (Exception ex)
         {
-            app.Logger.LogWarning("Ignorando XML inv·lido o distinto: {Message}", ex.Message);
+            app.Logger.LogWarning("Ignorando XML inv√°lido o distinto: {Message}", ex.Message);
         }
 
-        // 3. RESPUESTA R¡PIDA: Siempre devolver 200 OK
+        // 3. RESPUESTA R√ÅPIDA: Siempre devolver 200 OK
         return Results.Ok();
     }
 
-    return Results.StatusCode(405); // MÈtodo no permitido
+    return Results.StatusCode(405); // M√©todo no permitido
 });
 
 app.Run();
@@ -86,7 +86,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
 {
     try
     {
-        Console.WriteLine("Procesando webhook para VideoId: {VideoId}", videoId);
+        app.Logger.LogInformation("Procesando webhook para VideoId: {VideoId}", videoId);
 
         // 1. Consultar a YouTube sobre el estado de ESTE video
         var videoRequest = _youtubeService.Videos.List("snippet,contentDetails");
@@ -109,11 +109,11 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
             .Child(firebaseKey)
             .OnceSingleAsync<FirebaseChannel>();
 
-        // Si el canal no existÌa en la DB, asumimos valores por defecto
+        // Si el canal no exist√≠a en la DB, asumimos valores por defecto
         bool estabaEnVivo = canalEnFirebase?.ChannelLive ?? false;
         string videoVivoActualId = canalEnFirebase?.LiveVideoId ?? "";
 
-        // 3. L”GICA DE ACTUALIZACI”N INTELIGENTE
+        // 3. L√ìGICA DE ACTUALIZACI√ìN INTELIGENTE
         object actualizacionParcial;
 
         if (estaEnVivo)
@@ -127,24 +127,24 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                 LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
 
-            Console.WriteLine("Canal {ChannelName} empezÛ a transmitir en vivo vÌa Webhook.", channelName);
+            app.Logger.LogInformation("Canal {ChannelName} empez√≥ a transmitir en vivo v√≠a Webhook.", channelName);
 
         }
         else
         {
-            // B. El aviso NO es de un vivo (es un video normal, un Short, o un stream que terminÛ)
+            // B. El aviso NO es de un vivo (es un video normal, un Short, o un stream que termin√≥)
             if (estabaEnVivo && videoVivoActualId != videoId && !string.IsNullOrEmpty(videoVivoActualId))
             {
-                // °EL CASO RARO SALVADO! 
-                // El canal est· en vivo (con otro ID), pero subieron un Short.
+                // ¬°EL CASO RARO SALVADO! 
+                // El canal est√° en vivo (con otro ID), pero subieron un Short.
                 // Solo actualizamos la actividad, NO apagamos el stream.
-                Console.WriteLine("Canal en vivo con otro video ({VideoVivoActualId}). El aviso es de otro video ({VideoId}). Solo actualizamos fecha.", videoVivoActualId, videoId);
+                app.Logger.LogInformation("Canal en vivo con otro video ({VideoVivoActualId}). El aviso es de otro video ({VideoId}). Solo actualizamos fecha.", videoVivoActualId, videoId);
 
                 actualizacionParcial = new
                 {
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                Console.WriteLine("Canal {ChannelName} actualizado vÌa Webhook.", channelName);
+                app.Logger.LogInformation("Canal {ChannelName} actualizado v√≠a Webhook.", channelName);
 
             }
             else
@@ -158,7 +158,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
                     LiveVideoId = "", // Limpiamos el ID
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                Console.WriteLine("Canal {ChannelName} pasÛ a off el streaming vÌa Webhook.", channelName);
+                app.Logger.LogInformatiom("Canal {ChannelName} pas√≥ a off el streaming v√≠a Webhook.", channelName);
 
             }
         }
@@ -172,7 +172,7 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
     }
     catch (Exception ex)
     {
-        Console.WriteLine("Error al procesar el webhook del video {VideoId}", videoId);
+        app.Logger.LogInformation("Error al procesar el webhook del video {VideoId}", videoId);
     }
 }
 string SanitizarKeyFirebase(string key)
@@ -192,5 +192,5 @@ public class FirebaseChannel
     public string ChannelImgLiveUrl { get; set; }
     public bool ChannelLive { get; set; }
     public string LastActivityAt { get; set; }
-    public string LiveVideoId { get; set; } // °NUEVO!
+    public string LiveVideoId { get; set; } // ¬°NUEVO!
 }
