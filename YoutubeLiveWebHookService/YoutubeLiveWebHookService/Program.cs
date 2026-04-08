@@ -88,6 +88,8 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
     {
         app.Logger.LogInformation("Procesando webhook para VideoId: {VideoId}", videoId);
 
+        await Task.Delay(10000);
+
         // 1. Consultar a YouTube sobre el estado de ESTE video
         var videoRequest = _youtubeService.Videos.List("snippet,contentDetails");
         videoRequest.Id = videoId;
