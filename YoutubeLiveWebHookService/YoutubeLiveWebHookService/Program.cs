@@ -108,12 +108,6 @@ async Task ProcesarVideoAsync(string videoId, string channelId)
         // Tu variable final para saber si es un directo de verdad
         bool esVivoReal = estaEnVivo && !esEstreno;
 
-        if (!esVivoReal)
-        {
-            // Si no es un vivo real (o sea, es un estreno, un video normal, o está apagado), lo pateamos.
-            return;
-        }
-
         string liveImageUrl = esVivoReal ?
             (video.Snippet.Thumbnails?.High?.Url ?? video.Snippet.Thumbnails?.Medium?.Url ?? "") : "";
 
