@@ -158,7 +158,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
             // Juntamos todos los IDs separados por coma (ej: "vid1,vid2,vid3")
             string idsJuntos = string.Join(",", batch.Select(v => v.VideoId));
 
-            // ¡UNA SOLA CONSULTA A LA API!
             var videoRequest = _youtubeService.Videos.List("snippet,contentDetails");
             videoRequest.Id = idsJuntos;
             var videoResponse = await videoRequest.ExecuteAsync();
@@ -168,13 +167,22 @@ public class ProcesadorDeVivosBackground : BackgroundService
             // Procesamos cada uno y mandamos a Firebase
             foreach (var evento in batch)
             {
-                var videoInfo = videosEncontrados.FirstOrDefault(v => v.Id == evento.VideoId);
-                await ActualizarFirebaseParaVideoAsync(evento.VideoId, evento.ChannelId, videoInfo);
+                //  Un try-catch ADENTRO del foreach
+                try
+                {
+                    var videoInfo = videosEncontrados.FirstOrDefault(v => v.Id == evento.VideoId);
+                    await ActualizarFirebaseParaVideoAsync(evento.VideoId, evento.ChannelId, videoInfo);
+                }
+                catch (Exception ex)
+                {
+                    // Si falla un canal, logueamos, pero NO cortamos el foreach.
+                    _logger.LogError(ex, "Error aislando el canal {ChannelId} en el batch.", evento.ChannelId);
+                }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error grave procesando el batch de videos");
+            _logger.LogError(ex, "Error grave procesando la lista completa de YouTube");
         }
     }
 
@@ -246,7 +254,12 @@ public class ProcesadorDeVivosBackground : BackgroundService
     private string SanitizarKeyFirebase(string key)
     {
         if (string.IsNullOrWhiteSpace(key)) return "UnknownChannel";
-        return Regex.Replace(key, @"[.#$\[\]]", "").Trim();
+
+        // 1. Limpiamos los caracteres prohibidos por Firebase
+        string keyLimpia = Regex.Replace(key, @"[.#$\[\]]", "").Trim();
+
+        // 2. Codificamos la URL para que los espacios se vuelvan "%20" y el HttpClient no tire EOF
+        return Uri.EscapeDataString(keyLimpia);
     }
 }
 
