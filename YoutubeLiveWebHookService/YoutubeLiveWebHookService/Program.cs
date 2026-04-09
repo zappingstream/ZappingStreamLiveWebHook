@@ -139,7 +139,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     _logger.LogInformation("Procesando {Cantidad} webhooks agrupados en el último minuto.", buffer.Count);
 
                     // 4. Los 10 segundos de cortesía para que YouTube actualice sus servidores
-                    await Task.Delay(10000, stoppingToken);
+                    await Task.Delay(30000, stoppingToken);
 
                     // 5. Procesamos todos juntos gastando 1 solo punto
                     await ProcesarBatchAsync(buffer);
