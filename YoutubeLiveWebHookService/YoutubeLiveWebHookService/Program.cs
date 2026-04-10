@@ -260,46 +260,13 @@ public class ProcesadorDeVivosBackground : BackgroundService
         {
             if (estabaEnVivo && videoVivoActualId != videoId && !string.IsNullOrEmpty(videoVivoActualId))
             {
+                // Un aviso secundario (ej. un video viejo fue borrado, pero el canal sigue en vivo con otro video)
                 actualizacionParcial = new { LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") };
-
-                // Guardamos el estado principal
-                await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
-
-                // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
-                var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
-
-                if (esUpcomingReal)
-                {
-                    // Si está programado, lo metemos en la lista de upcoming
-                    string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
-
-                    var upcomingData = new
-                    {
-                        VideoId = videoId,
-                        Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
-                        ScheduledStartTime = horaProgramada,
-                        ThumbnailUrl = liveImageUrl,
-                        AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-                    };
-
-                    await upcomingRef.PutAsync(upcomingData);
-                    _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
-                }
-                else
-                {
-                    // Si está EN VIVO, si terminó, si fue borrado, o si es un estreno pregrabado:
-                    // DEBE DESAPARECER de la lista de próximos. 
-                    // DeleteAsync no tira error si el nodo no existe, así que es seguro llamarlo siempre.
-                    await upcomingRef.DeleteAsync();
-
-                    if (esVivoReal)
-                    {
-                        _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO. Borrado de la lista Upcoming.", videoId, channelName);
-                    }
-                }
+                _logger.LogInformation("Aviso secundario. Canal {ChannelName} sigue en vivo con otro ID.", channelName);
             }
             else
             {
+                // El canal se apaga
                 actualizacionParcial = new
                 {
                     ChannelLive = false,
@@ -308,6 +275,41 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
                 _logger.LogInformation("Canal {ChannelName} OFF (O es upcoming/estreno) vía Webhook.", channelName);
+            }
+        }
+
+        // 5. ¡AHORA SÍ! GUARDAMOS EL ESTADO PRINCIPAL EN FIREBASE SIEMPRE
+        await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
+
+        // 6. GESTIONAR LA SUBCARPETA "UPCOMING" (Independiente del nodo principal)
+        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
+
+        if (esUpcomingReal)
+        {
+            // Si está programado, lo guardamos/actualizamos en la lista
+            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
+
+            var upcomingData = new
+            {
+                VideoId = videoId,
+                Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
+                ScheduledStartTime = horaProgramada,
+                ThumbnailUrl = liveImageUrl,
+                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            };
+
+            await upcomingRef.PutAsync(upcomingData);
+            _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
+        }
+        else
+        {
+            // Si está EN VIVO, si terminó, si fue borrado, o es un estreno:
+            // DEBE DESAPARECER de la lista de próximos. 
+            await upcomingRef.DeleteAsync();
+
+            if (esVivoReal)
+            {
+                _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO.", videoId, channelName);
             }
         }
 
