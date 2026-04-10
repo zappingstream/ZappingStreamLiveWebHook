@@ -261,6 +261,42 @@ public class ProcesadorDeVivosBackground : BackgroundService
             if (estabaEnVivo && videoVivoActualId != videoId && !string.IsNullOrEmpty(videoVivoActualId))
             {
                 actualizacionParcial = new { LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") };
+
+                // Guardamos el estado principal
+                await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
+
+                // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
+                var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
+
+                if (esUpcomingReal)
+                {
+                    // Si está programado, lo metemos en la lista de upcoming
+                    string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
+
+                    var upcomingData = new
+                    {
+                        VideoId = videoId,
+                        Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
+                        ScheduledStartTime = horaProgramada,
+                        ThumbnailUrl = liveImageUrl,
+                        AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    };
+
+                    await upcomingRef.PutAsync(upcomingData);
+                    _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
+                }
+                else
+                {
+                    // Si está EN VIVO, si terminó, si fue borrado, o si es un estreno pregrabado:
+                    // DEBE DESAPARECER de la lista de próximos. 
+                    // DeleteAsync no tira error si el nodo no existe, así que es seguro llamarlo siempre.
+                    await upcomingRef.DeleteAsync();
+
+                    if (esVivoReal)
+                    {
+                        _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO. Borrado de la lista Upcoming.", videoId, channelName);
+                    }
+                }
             }
             else
             {
@@ -275,41 +311,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
         }
 
-        // Guardamos el estado principal
-        await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
-
-        // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
-        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
-
-        if (esUpcomingReal)
-        {
-            // Si está programado, lo metemos en la lista de upcoming
-            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
-
-            var upcomingData = new
-            {
-                VideoId = videoId,
-                Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
-                ScheduledStartTime = horaProgramada,
-                ThumbnailUrl = liveImageUrl,
-                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            };
-
-            await upcomingRef.PutAsync(upcomingData);
-            _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
-        }
-        else
-        {
-            // Si está EN VIVO, si terminó, si fue borrado, o si es un estreno pregrabado:
-            // DEBE DESAPARECER de la lista de próximos. 
-            // DeleteAsync no tira error si el nodo no existe, así que es seguro llamarlo siempre.
-            await upcomingRef.DeleteAsync();
-
-            if (esVivoReal)
-            {
-                _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO. Borrado de la lista Upcoming.", videoId, channelName);
-            }
-        }
     }
 
     private string SanitizarKeyFirebase(string key)
