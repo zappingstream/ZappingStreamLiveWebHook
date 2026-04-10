@@ -158,7 +158,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
             // Juntamos todos los IDs separados por coma (ej: "vid1,vid2,vid3")
             string idsJuntos = string.Join(",", batch.Select(v => v.VideoId));
 
-            var videoRequest = _youtubeService.Videos.List("snippet,contentDetails");
+            var videoRequest = _youtubeService.Videos.List("snippet,contentDetails,liveStreamingDetails");
             videoRequest.Id = idsJuntos;
             var videoResponse = await videoRequest.ExecuteAsync();
 
@@ -188,21 +188,53 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
     private async Task ActualizarFirebaseParaVideoAsync(string videoId, string channelIdInfo, Google.Apis.YouTube.v3.Data.Video videoInfo)
     {
-        // Si videoInfo es null, significa que el video fue borrado o es privado
-        bool estaEnVivo = videoInfo?.Snippet?.LiveBroadcastContent == "live";
+        // 1. DETERMINAR EL ESTADO DEL VIDEO
+        string broadcastStatus = videoInfo?.Snippet?.LiveBroadcastContent ?? "none";
         string duracion = videoInfo?.ContentDetails?.Duration ?? "";
 
-        bool esEstreno = estaEnVivo && duracion != "P0D" && duracion != "PT0S";
-        bool esVivoReal = estaEnVivo && !esEstreno;
+        bool esEnVivo = broadcastStatus == "live";
+        bool esUpcoming = broadcastStatus == "upcoming";
 
-        string liveImageUrl = esVivoReal ?
-            (videoInfo.Snippet.Thumbnails?.High?.Url ?? videoInfo.Snippet.Thumbnails?.Medium?.Url ?? "") : "";
+        // Un video pregrabado (estreno) suele tener duración. Un directo real puro suele tener P0D, PT0S o no tener duración.
+        bool esEstreno = duracion != "P0D" && duracion != "PT0S" && !string.IsNullOrEmpty(duracion);
 
-        // Si no tenemos info de YouTube, usamos el ChannelId que nos mandó el Webhook
-        string channelName = videoInfo?.Snippet?.ChannelTitle ?? channelIdInfo;
-        string firebaseKey = SanitizarKeyFirebase(channelName);
+        bool esVivoReal = esEnVivo && !esEstreno;
+        bool esUpcomingReal = esUpcoming && !esEstreno;
 
-        // LEER EL ESTADO ACTUAL EN FIREBASE
+        // Obtener imagen del directo/miniatura
+        string liveImageUrl = videoInfo?.Snippet?.Thumbnails?.High?.Url ?? videoInfo?.Snippet?.Thumbnails?.Medium?.Url ?? "";
+
+        // 2. IDENTIFICAR EL CANAL (Firebase Key)
+        string channelName = "";
+        string firebaseKey = "";
+
+        if (videoInfo != null)
+        {
+            channelName = videoInfo.Snippet.ChannelTitle;
+            firebaseKey = SanitizarKeyFirebase(channelName);
+        }
+        else
+        {
+            // Si el video desapareció, buscamos a quién le pertenecía en Firebase (ya sea en vivos o en upcoming)
+            var canalesEnFirebaseBuscador = await _firebaseClient.Child("Channels").OnceAsync<FirebaseChannel>();
+            var canalAfectado = canalesEnFirebaseBuscador.FirstOrDefault(c =>
+                c.Object.LiveVideoId == videoId); // Buscamos si estaba en vivo
+
+            if (canalAfectado != null)
+            {
+                firebaseKey = canalAfectado.Key;
+                channelName = canalAfectado.Object.ChannelName ?? firebaseKey;
+            }
+            else
+            {
+                _logger.LogWarning("Webhook inútil: El video {VideoId} no existe en YT ni está como Vivo en Firebase.", videoId);
+                // NOTA: Si el video era un "Upcoming" que fue cancelado antes de emitirse, lo dejaremos pasar por aquí. 
+                // Para ser 100% pulcros, podrías buscar también en las carpetas Upcoming, pero no es crítico.
+                return;
+            }
+        }
+
+        // 3. LEER EL ESTADO ACTUAL DEL CANAL EN FIREBASE
         var canalEnFirebase = await _firebaseClient
             .Child("Channels")
             .Child(firebaseKey)
@@ -211,8 +243,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
         bool estabaEnVivo = canalEnFirebase?.ChannelLive ?? false;
         string videoVivoActualId = canalEnFirebase?.LiveVideoId ?? "";
 
+        // 4. ACTUALIZAR EL NODO PRINCIPAL DEL CANAL (VIVOS)
         object actualizacionParcial;
-
         if (esVivoReal)
         {
             actualizacionParcial = new
@@ -229,7 +261,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
             if (estabaEnVivo && videoVivoActualId != videoId && !string.IsNullOrEmpty(videoVivoActualId))
             {
                 actualizacionParcial = new { LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") };
-                _logger.LogInformation("Aviso secundario. Canal {ChannelName} sigue en vivo con {VideoVivoActualId}.", channelName, videoVivoActualId);
             }
             else
             {
@@ -240,15 +271,45 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     LiveVideoId = "",
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                _logger.LogInformation("Canal {ChannelName} OFF vía Webhook.", channelName);
+                _logger.LogInformation("Canal {ChannelName} OFF (O es upcoming/estreno) vía Webhook.", channelName);
             }
         }
 
-        // MANDAMOS A FIREBASE
-        await _firebaseClient
-            .Child("Channels")
-            .Child(firebaseKey)
-            .PatchAsync(actualizacionParcial);
+        // Guardamos el estado principal
+        await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
+
+        // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
+        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
+
+        if (esUpcomingReal)
+        {
+            // Si está programado, lo metemos en la lista de upcoming
+            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
+
+            var upcomingData = new
+            {
+                VideoId = videoId,
+                Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
+                ScheduledStartTime = horaProgramada,
+                ThumbnailUrl = liveImageUrl,
+                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            };
+
+            await upcomingRef.PutAsync(upcomingData);
+            _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
+        }
+        else
+        {
+            // Si está EN VIVO, si terminó, si fue borrado, o si es un estreno pregrabado:
+            // DEBE DESAPARECER de la lista de próximos. 
+            // DeleteAsync no tira error si el nodo no existe, así que es seguro llamarlo siempre.
+            await upcomingRef.DeleteAsync();
+
+            if (esVivoReal)
+            {
+                _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO. Borrado de la lista Upcoming.", videoId, channelName);
+            }
+        }
     }
 
     private string SanitizarKeyFirebase(string key)
