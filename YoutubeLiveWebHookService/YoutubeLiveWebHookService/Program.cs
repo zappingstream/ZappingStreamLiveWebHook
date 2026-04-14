@@ -2,7 +2,6 @@ using Firebase.Database;
 using Firebase.Database.Query;
 using Google.Apis.Services;
 using Google.Apis.YouTube.v3;
-using Google.Apis.YouTube.v3.Data;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
@@ -198,7 +197,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
         // Un video pregrabado (estreno) suele tener duración. Un directo real puro suele tener P0D, PT0S o no tener duración.
         bool esEstreno = videoInfo?.LiveStreamingDetails != null && videoInfo?.LiveStreamingDetails?.ConcurrentViewers == null;
-
 
         bool esVivoReal = esEnVivo && !esEstreno;
         bool esUpcomingReal = esUpcoming && !esEstreno;
