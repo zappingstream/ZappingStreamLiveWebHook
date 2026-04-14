@@ -196,7 +196,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
         bool esUpcoming = broadcastStatus == "upcoming";
 
         // Un video pregrabado (estreno) suele tener duración. Un directo real puro suele tener P0D, PT0S o no tener duración.
-        bool esEstreno = videoInfo?.LiveStreamingDetails != null && videoInfo?.LiveStreamingDetails?.ConcurrentViewers == null;
+        bool esEstreno = videoInfo?.LiveStreamingDetails != null && videoInfo?.LiveStreamingDetails?.ConcurrentViewers == null &&
+                         videoInfo?.ContentDetails != null && !(videoInfo?.ContentDetails?.Duration == "P0D" || videoInfo?.ContentDetails?.Duration == "PT0D");
 
         bool esVivoReal = esEnVivo && !esEstreno;
         bool esUpcomingReal = esUpcoming && !esEstreno;
