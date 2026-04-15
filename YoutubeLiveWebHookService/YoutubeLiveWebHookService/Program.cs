@@ -193,7 +193,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else
         {
-            // Búsqueda profunda si el video desapareció (Buscamos en las listas nuevas)
             var canalesEnFirebaseBuscador = await _firebaseClient.Child("Channels").OnceAsync<FirebaseChannel>();
             var canalAfectado = canalesEnFirebaseBuscador.FirstOrDefault(c =>
                 c.Object.LiveVideoId == videoId ||
@@ -215,17 +214,31 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 3. LEER EL ESTADO ACTUAL DEL CANAL EN FIREBASE
         var canalEnFirebase = await _firebaseClient.Child("Channels").Child(firebaseKey).OnceSingleAsync<FirebaseChannel>();
         var vivosActuales = canalEnFirebase?.Actives ?? new Dictionary<string, ActiveVideo>();
+        var upcomingActuales = canalEnFirebase?.Upcoming ?? new Dictionary<string, UpcomingVideo>();
+        string legacyLiveVideoId = canalEnFirebase?.LiveVideoId ?? "";
+
+        // --- EL ESCUDO ANTI-REELS / VODs ---
+        bool estabaEnActivos = vivosActuales.ContainsKey(videoId);
+        bool eraElVivoLegacy = legacyLiveVideoId == videoId;
+        bool estabaEnUpcoming = upcomingActuales.ContainsKey(videoId);
+
+        // Si es un video normal (no vivo, no upcoming) y NUNCA estuvo registrado en nuestro sistema...
+        // Es un simple Short, Reel o subida tradicional. Lo ignoramos por completo para no romper nada.
+        if (!esVivoReal && !esUpcomingReal && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming)
+        {
+            _logger.LogInformation("Escudo activado: Ignorando VOD/Reel redundante {VideoId} del canal {ChannelName}.", videoId, channelName);
+            return;
+        }
 
         // Referencias directas a las subcarpetas del video
         var activeRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Actives").Child(videoId);
         var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
 
-        object actualizacionParcial;
+        object actualizacionParcial = null;
 
-        // 4. LOGICA DE VIVOS MÚLTIPLES
+        // 4. LÓGICA DE VIVOS MÚLTIPLES
         if (esVivoReal)
         {
-            // Agregamos a la colección Actives
             var activeData = new ActiveVideo
             {
                 VideoId = videoId,
@@ -235,42 +248,42 @@ public class ProcesadorDeVivosBackground : BackgroundService
             };
             await activeRef.PutAsync(activeData);
 
-            // Mantenemos el parche Legacy para no romper el front viejo
             actualizacionParcial = new
             {
                 ChannelLive = true,
                 ChannelImgLiveUrl = liveImageUrl,
-                LiveVideoId = videoId, // Pasa a ser "el último vivo detectado"
+                LiveVideoId = videoId,
                 LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
             _logger.LogInformation("Canal {ChannelName} ON vía Webhook. Video {VideoId} agregado a Actives.", channelName, videoId);
         }
-        else
+        else if (estabaEnActivos || eraElVivoLegacy)
         {
-            // El video se apagó o cambió de estado. Lo volamos de la lista de Activos.
+            // Solo procesamos el OFF si el video realmente lo teníamos registrado como encendido
             await activeRef.DeleteAsync();
 
-            // Verificamos si quedaban OTROS videos en vivo (excluyendo el que se acaba de apagar)
             var vivosRestantes = vivosActuales.Where(kv => kv.Key != videoId).Select(kv => kv.Value).ToList();
             bool quedanOtrosVivos = vivosRestantes.Any();
 
-            if (quedanOtrosVivos)
-            {
-                // Agarramos el stream sobreviviente más reciente para hacer fallback
-                var fallbackVideo = vivosRestantes.OrderByDescending(v => v.AddedAt).First();
+            // Salvavidas por si el canal solo dependía de la variable Legacy y el array estaba vacío
+            bool sobreviveLegacy = !string.IsNullOrEmpty(legacyLiveVideoId) && legacyLiveVideoId != videoId && !vivosActuales.ContainsKey(legacyLiveVideoId);
 
-                // Actualizamos la última actividad y hacemos que el front salte al otro stream
+            if (quedanOtrosVivos || sobreviveLegacy)
+            {
+                // Fallback al stream que quede
+                string fallbackId = quedanOtrosVivos ? vivosRestantes.OrderByDescending(v => v.AddedAt).First().VideoId : legacyLiveVideoId;
+                string fallbackImg = quedanOtrosVivos ? vivosRestantes.OrderByDescending(v => v.AddedAt).First().ThumbnailUrl : canalEnFirebase?.ChannelImgLiveUrl;
+
                 actualizacionParcial = new
                 {
-                    LiveVideoId = fallbackVideo.VideoId,
-                    ChannelImgLiveUrl = fallbackVideo.ThumbnailUrl,
+                    LiveVideoId = fallbackId,
+                    ChannelImgLiveUrl = fallbackImg,
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                _logger.LogInformation("Aviso secundario. Se apagó {VideoId} pero el canal {ChannelName} hace fallback automático al stream {FallbackId}.", videoId, channelName, fallbackVideo.VideoId);
+                _logger.LogInformation("Aviso secundario. Se apagó {VideoId} pero {ChannelName} hace fallback automático al ID {FallbackId}.", videoId, channelName, fallbackId);
             }
             else
             {
-                // Se apagó el ÚLTIMO vivo que quedaba, ahora sí apagamos el canal entero
                 actualizacionParcial = new
                 {
                     ChannelLive = false,
@@ -282,8 +295,11 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
         }
 
-        // Aplicamos el parche en el nodo principal (Legacy + LastActivity)
-        await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
+        // Aplicamos el parche en el nodo principal solo si hubo cambios en los vivos
+        if (actualizacionParcial != null)
+        {
+            await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
+        }
 
         // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
         if (esUpcomingReal)
@@ -301,9 +317,9 @@ public class ProcesadorDeVivosBackground : BackgroundService
             await upcomingRef.PutAsync(upcomingData);
             _logger.LogInformation("PROGRAMADO: El canal {ChannelName} tiene un directo upcoming ({VideoId}).", channelName, videoId);
         }
-        else
+        else if (estabaEnUpcoming)
         {
-            // Si está EN VIVO, o si terminó/fue borrado, se borra de Upcoming
+            // Solo disparamos el Delete en Firebase si sabemos que realmente estaba en la lista de Upcoming
             await upcomingRef.DeleteAsync();
             if (esVivoReal)
             {
