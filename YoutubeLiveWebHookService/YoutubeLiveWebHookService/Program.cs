@@ -14,7 +14,7 @@ string firebaseUrl = builder.Configuration["Firebase:Url"] ?? "https://zappingst
 string ytApiKey = builder.Configuration["YouTube:ApiKey"] ?? "";
 string firebaseSecret = builder.Configuration["Firebase:Secret"] ?? "";
 
-// 2. INYECCIÓN DE DEPENDENCIAS (Para usar en toda la app y en el proceso de fondo)
+// 2. INYECCIÓN DE DEPENDENCIAS
 builder.Services.AddSingleton(new FirebaseClient(firebaseUrl, new FirebaseOptions
 {
     AuthTokenAsyncFactory = () => Task.FromResult(firebaseSecret)
@@ -26,17 +26,15 @@ builder.Services.AddSingleton(new YouTubeService(new BaseClientService.Initializ
     ApplicationName = "ZappingStreamingWorker"
 }));
 
-// Creamos el "Canal" de comunicación (La cola de IDs)
 var channel = Channel.CreateUnbounded<VideoEvent>();
 builder.Services.AddSingleton(channel.Writer);
 builder.Services.AddSingleton(channel.Reader);
 
-// ¡ACÁ METEMOS TU SERVICIO DE FONDO!
 builder.Services.AddHostedService<ProcesadorDeVivosBackground>();
 
 var app = builder.Build();
 
-// 3. EL WEBHOOK (Ahora responde a Google al instante)
+// 3. EL WEBHOOK
 app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, ChannelWriter<VideoEvent> escritorCola, ILogger<Program> logger) =>
 {
     if (context.Request.Method == HttpMethods.Get)
@@ -77,7 +75,6 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
             logger.LogWarning("Ignorando XML: {Message}", ex.Message);
         }
 
-        // Respuesta instantánea a Google
         return Results.Ok();
     }
 
@@ -88,10 +85,8 @@ app.Run();
 
 // --- CLASES Y SERVICIOS AUXILIARES ---
 
-// El paquetito de datos que viaja del webhook al proceso de fondo
 public record VideoEvent(string VideoId, string ChannelId);
 
-// EL SERVICIO DE FONDO (El "Timer" con Buffer)
 public class ProcesadorDeVivosBackground : BackgroundService
 {
     private readonly ChannelReader<VideoEvent> _lectorCola;
@@ -115,19 +110,14 @@ public class ProcesadorDeVivosBackground : BackgroundService
     {
         var buffer = new List<VideoEvent>();
 
-        // Este bucle corre para siempre mientras Render esté prendido
         while (!stoppingToken.IsCancellationRequested)
         {
-            // 1. El hilo duerme acá sin gastar CPU hasta que entre el PRIMER aviso
             if (await _lectorCola.WaitToReadAsync(stoppingToken))
             {
-                // 2. ¡Entró uno! Abrimos la "ventana de recolección" por 1 minuto.
                 await Task.Delay(60000, stoppingToken);
 
-                // 3. Se cerró la ventana. Sacamos todo lo que se haya juntado (hasta 50)
                 while (buffer.Count < 50 && _lectorCola.TryRead(out var videoEvent))
                 {
-                    // Filtramos duplicados en el mismo paquete
                     if (!buffer.Any(v => v.VideoId == videoEvent.VideoId))
                     {
                         buffer.Add(videoEvent);
@@ -137,14 +127,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 if (buffer.Any())
                 {
                     _logger.LogInformation("Procesando {Cantidad} webhooks agrupados en el último minuto.", buffer.Count);
-
-                    // 4. Los 10 segundos de cortesía para que YouTube actualice sus servidores
                     await Task.Delay(30000, stoppingToken);
-
-                    // 5. Procesamos todos juntos gastando 1 solo punto
                     await ProcesarBatchAsync(buffer);
-
-                    // 6. Limpiamos el taper para la próxima
                     buffer.Clear();
                 }
             }
@@ -155,7 +139,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
     {
         try
         {
-            // Juntamos todos los IDs separados por coma (ej: "vid1,vid2,vid3")
             string idsJuntos = string.Join(",", batch.Select(v => v.VideoId));
 
             var videoRequest = _youtubeService.Videos.List("snippet,contentDetails,liveStreamingDetails");
@@ -164,10 +147,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
             var videosEncontrados = videoResponse.Items ?? new List<Google.Apis.YouTube.v3.Data.Video>();
 
-            // Procesamos cada uno y mandamos a Firebase
             foreach (var evento in batch)
             {
-                //  Un try-catch ADENTRO del foreach
                 try
                 {
                     var videoInfo = videosEncontrados.FirstOrDefault(v => v.Id == evento.VideoId);
@@ -175,7 +156,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    // Si falla un canal, logueamos, pero NO cortamos el foreach.
                     _logger.LogError(ex, "Error aislando el canal {ChannelId} en el batch.", evento.ChannelId);
                 }
             }
@@ -190,22 +170,19 @@ public class ProcesadorDeVivosBackground : BackgroundService
     {
         // 1. DETERMINAR EL ESTADO DEL VIDEO
         string broadcastStatus = videoInfo?.Snippet?.LiveBroadcastContent ?? "none";
-        string duracion = videoInfo?.ContentDetails?.Duration ?? "";
 
         bool esEnVivo = broadcastStatus == "live";
         bool esUpcoming = broadcastStatus == "upcoming";
 
-        // Un video pregrabado (estreno) suele tener duración. Un directo real puro suele tener P0D, PT0S o no tener duración.
         bool esEstreno = videoInfo?.LiveStreamingDetails != null && videoInfo?.LiveStreamingDetails?.ConcurrentViewers == null &&
                          videoInfo?.ContentDetails != null && !(videoInfo?.ContentDetails?.Duration == "P0D" || videoInfo?.ContentDetails?.Duration == "PT0D");
 
         bool esVivoReal = esEnVivo && !esEstreno;
         bool esUpcomingReal = esUpcoming && !esEstreno;
 
-        // Obtener imagen del directo/miniatura
         string liveImageUrl = videoInfo?.Snippet?.Thumbnails?.High?.Url ?? videoInfo?.Snippet?.Thumbnails?.Medium?.Url ?? "";
 
-        // 2. IDENTIFICAR EL CANAL (Firebase Key)
+        // 2. IDENTIFICAR EL CANAL
         string channelName = "";
         string firebaseKey = "";
 
@@ -216,10 +193,12 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else
         {
-            // Si el video desapareció, buscamos a quién le pertenecía en Firebase (ya sea en vivos o en upcoming)
+            // Búsqueda profunda si el video desapareció (Buscamos en las listas nuevas)
             var canalesEnFirebaseBuscador = await _firebaseClient.Child("Channels").OnceAsync<FirebaseChannel>();
             var canalAfectado = canalesEnFirebaseBuscador.FirstOrDefault(c =>
-                c.Object.LiveVideoId == videoId); // Buscamos si estaba en vivo
+                c.Object.LiveVideoId == videoId ||
+                (c.Object.Actives != null && c.Object.Actives.ContainsKey(videoId)) ||
+                (c.Object.Upcoming != null && c.Object.Upcoming.ContainsKey(videoId)));
 
             if (canalAfectado != null)
             {
@@ -228,46 +207,70 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
             else
             {
-                _logger.LogWarning("Webhook inútil: El video {VideoId} no existe en YT ni está como Vivo en Firebase.", videoId);
-                // NOTA: Si el video era un "Upcoming" que fue cancelado antes de emitirse, lo dejaremos pasar por aquí. 
-                // Para ser 100% pulcros, podrías buscar también en las carpetas Upcoming, pero no es crítico.
+                _logger.LogWarning("Webhook inútil: El video {VideoId} no existe en YT ni está registrado en Firebase.", videoId);
                 return;
             }
         }
 
         // 3. LEER EL ESTADO ACTUAL DEL CANAL EN FIREBASE
-        var canalEnFirebase = await _firebaseClient
-            .Child("Channels")
-            .Child(firebaseKey)
-            .OnceSingleAsync<FirebaseChannel>();
+        var canalEnFirebase = await _firebaseClient.Child("Channels").Child(firebaseKey).OnceSingleAsync<FirebaseChannel>();
+        var vivosActuales = canalEnFirebase?.Actives ?? new Dictionary<string, ActiveVideo>();
 
-        bool estabaEnVivo = canalEnFirebase?.ChannelLive ?? false;
-        string videoVivoActualId = canalEnFirebase?.LiveVideoId ?? "";
+        // Referencias directas a las subcarpetas del video
+        var activeRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Actives").Child(videoId);
+        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
 
-        // 4. ACTUALIZAR EL NODO PRINCIPAL DEL CANAL (VIVOS)
         object actualizacionParcial;
+
+        // 4. LOGICA DE VIVOS MÚLTIPLES
         if (esVivoReal)
         {
+            // Agregamos a la colección Actives
+            var activeData = new ActiveVideo
+            {
+                VideoId = videoId,
+                Title = videoInfo?.Snippet?.Title ?? "Directo",
+                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ThumbnailUrl = liveImageUrl
+            };
+            await activeRef.PutAsync(activeData);
+
+            // Mantenemos el parche Legacy para no romper el front viejo
             actualizacionParcial = new
             {
                 ChannelLive = true,
                 ChannelImgLiveUrl = liveImageUrl,
-                LiveVideoId = videoId,
+                LiveVideoId = videoId, // Pasa a ser "el último vivo detectado"
                 LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
-            _logger.LogInformation("Canal {ChannelName} ON vía Webhook.", channelName);
+            _logger.LogInformation("Canal {ChannelName} ON vía Webhook. Video {VideoId} agregado a Actives.", channelName, videoId);
         }
         else
         {
-            if (estabaEnVivo && videoVivoActualId != videoId && !string.IsNullOrEmpty(videoVivoActualId))
+            // El video se apagó o cambió de estado. Lo volamos de la lista de Activos.
+            await activeRef.DeleteAsync();
+
+            // Verificamos si quedaban OTROS videos en vivo (excluyendo el que se acaba de apagar)
+            var vivosRestantes = vivosActuales.Where(kv => kv.Key != videoId).Select(kv => kv.Value).ToList();
+            bool quedanOtrosVivos = vivosRestantes.Any();
+
+            if (quedanOtrosVivos)
             {
-                // Un aviso secundario (ej. un video viejo fue borrado, pero el canal sigue en vivo con otro video)
-                actualizacionParcial = new { LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") };
-                _logger.LogInformation("Aviso secundario. Canal {ChannelName} sigue en vivo con otro ID.", channelName);
+                // Agarramos el stream sobreviviente más reciente para hacer fallback
+                var fallbackVideo = vivosRestantes.OrderByDescending(v => v.AddedAt).First();
+
+                // Actualizamos la última actividad y hacemos que el front salte al otro stream
+                actualizacionParcial = new
+                {
+                    LiveVideoId = fallbackVideo.VideoId,
+                    ChannelImgLiveUrl = fallbackVideo.ThumbnailUrl,
+                    LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                };
+                _logger.LogInformation("Aviso secundario. Se apagó {VideoId} pero el canal {ChannelName} hace fallback automático al stream {FallbackId}.", videoId, channelName, fallbackVideo.VideoId);
             }
             else
             {
-                // El canal se apaga
+                // Se apagó el ÚLTIMO vivo que quedaba, ahora sí apagamos el canal entero
                 actualizacionParcial = new
                 {
                     ChannelLive = false,
@@ -275,22 +278,18 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     LiveVideoId = "",
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
                 };
-                _logger.LogInformation("Canal {ChannelName} OFF (O es upcoming/estreno) vía Webhook.", channelName);
+                _logger.LogInformation("Canal {ChannelName} OFF totalmente vía Webhook.", channelName);
             }
         }
 
-        // 5. ¡AHORA SÍ! GUARDAMOS EL ESTADO PRINCIPAL EN FIREBASE SIEMPRE
+        // Aplicamos el parche en el nodo principal (Legacy + LastActivity)
         await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
 
-        // 6. GESTIONAR LA SUBCARPETA "UPCOMING" (Independiente del nodo principal)
-        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
-
+        // 5. GESTIONAR LA SUBCARPETA "UPCOMING"
         if (esUpcomingReal)
         {
-            // Si está programado, lo guardamos/actualizamos en la lista
             string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
-
-            var upcomingData = new
+            var upcomingData = new UpcomingVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? "Directo Programado",
@@ -304,30 +303,24 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else
         {
-            // Si está EN VIVO, si terminó, si fue borrado, o es un estreno:
-            // DEBE DESAPARECER de la lista de próximos. 
+            // Si está EN VIVO, o si terminó/fue borrado, se borra de Upcoming
             await upcomingRef.DeleteAsync();
-
             if (esVivoReal)
             {
                 _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO.", videoId, channelName);
             }
         }
-
     }
 
     private string SanitizarKeyFirebase(string key)
     {
         if (string.IsNullOrWhiteSpace(key)) return "UnknownChannel";
-
-        // 1. Limpiamos los caracteres prohibidos por Firebase
         string keyLimpia = Regex.Replace(key, @"[.#$\[\]]", "").Trim();
-
-        // 2. Codificamos la URL para que los espacios se vuelvan "%20" y el HttpClient no tire EOF
         return Uri.EscapeDataString(keyLimpia);
     }
 }
 
+// --- MODELOS DE DATOS ---
 public class FirebaseChannel
 {
     public string ChannelName { get; set; }
@@ -336,8 +329,32 @@ public class FirebaseChannel
     public string ChannelType { get; set; }
     public string ChannelLiveUrl { get; set; }
     public string ChannelImgUrl { get; set; }
+
+    // Legacy
     public string ChannelImgLiveUrl { get; set; }
     public bool ChannelLive { get; set; }
-    public string LastActivityAt { get; set; }
     public string LiveVideoId { get; set; }
+    public string LastActivityAt { get; set; }
+
+    // Colecciones multi-estado
+    public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
+    public Dictionary<string, ActiveVideo> Actives { get; set; }
+}
+
+public class UpcomingVideo
+{
+    public string VideoId { get; set; }
+    public string Title { get; set; }
+    public string ScheduledStartTime { get; set; }
+    public string ThumbnailUrl { get; set; }
+    public string AddedAt { get; set; }
+}
+
+public class ActiveVideo
+{
+    public string VideoId { get; set; }
+    public string Title { get; set; }
+    public string ScheduledStartTime { get; set; }
+    public string ThumbnailUrl { get; set; }
+    public string AddedAt { get; set; }
 }
