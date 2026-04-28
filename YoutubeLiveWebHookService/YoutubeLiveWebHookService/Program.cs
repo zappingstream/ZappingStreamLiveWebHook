@@ -240,8 +240,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
         var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
 
         object actualizacionParcial = null;
+        bool huboCambiosEnVivos = false;
 
-        // 4. LÓGICA DE VIVOS MÚLTIPLES Y ESTRENOS LIVE
         if (esEnVivo)
         {
             var activeData = new ActiveVideo
@@ -254,51 +254,74 @@ public class ProcesadorDeVivosBackground : BackgroundService
             };
             await activeRef.PutAsync(activeData);
 
-            actualizacionParcial = new
-            {
-                ChannelLive = true,
-                ChannelImgLiveUrl = liveImageUrl,
-                LiveVideoId = videoId,
-                LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                IsPremiere = esEstreno // Guardamos el flag en el nodo principal del canal
-            };
-            _logger.LogInformation("Canal {ChannelName} ON. Video {VideoId} a Actives. ¿Es Estreno?: {EsEstreno}", channelName, videoId, esEstreno);
+            // Actualizamos nuestra lista en memoria para poder calcular el "ganador"
+            vivosActuales[videoId] = activeData;
+            huboCambiosEnVivos = true;
         }
         else if (estabaEnActivos || eraElVivoLegacy)
         {
             await activeRef.DeleteAsync();
 
-            var vivosRestantes = vivosActuales.Where(kv => kv.Key != videoId).Select(kv => kv.Value).ToList();
-            bool quedanOtrosVivos = vivosRestantes.Any();
-            bool sobreviveLegacy = !string.IsNullOrEmpty(legacyLiveVideoId) && legacyLiveVideoId != videoId && !vivosActuales.ContainsKey(legacyLiveVideoId);
-
-            if (quedanOtrosVivos || sobreviveLegacy)
+            // Lo quitamos de la lista en memoria
+            if (vivosActuales.ContainsKey(videoId))
             {
-                var fallbackVivo = quedanOtrosVivos ? vivosRestantes.OrderByDescending(v => v.AddedAt).First() : null;
-                string fallbackId = fallbackVivo?.VideoId ?? legacyLiveVideoId;
-                string fallbackImg = fallbackVivo?.ThumbnailUrl ?? canalEnFirebase?.ChannelImgLiveUrl;
-                bool fallbackIsPremiere = fallbackVivo?.IsPremiere ?? canalEnFirebase?.IsPremiere ?? false;
+                vivosActuales.Remove(videoId);
+            }
+            huboCambiosEnVivos = true;
+        }
+
+        // Si se prendió o se apagó algo, decidimos quién controla el nodo principal del canal
+        if (huboCambiosEnVivos)
+        {
+            var vivosRestantes = vivosActuales.Values.ToList();
+
+            if (vivosRestantes.Any())
+            {
+                // PRECEDENCIA: Al ordenar booleanos, 'false' (Vivo Real) siempre va antes que 'true' (Estreno).
+                var streamGanador = vivosRestantes
+                    .OrderBy(v => v.IsPremiere)
+                    .ThenByDescending(v => v.AddedAt)
+                    .First();
 
                 actualizacionParcial = new
                 {
-                    LiveVideoId = fallbackId,
-                    ChannelImgLiveUrl = fallbackImg,
+                    ChannelLive = true,
+                    LiveVideoId = streamGanador.VideoId,
+                    ChannelImgLiveUrl = streamGanador.ThumbnailUrl,
                     LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    IsPremiere = fallbackIsPremiere // Hereda el estado de premiere del vivo que queda
+                    IsPremiere = streamGanador.IsPremiere
                 };
-                _logger.LogInformation("Aviso secundario. Se apagó {VideoId} pero {ChannelName} hace fallback automático al ID {FallbackId}.", videoId, channelName, fallbackId);
+
+                _logger.LogInformation("Canal {ChannelName} reevaluado. Stream principal elegido: {GanadorId} (¿Es Estreno?: {EsEstreno})",
+                    channelName, streamGanador.VideoId, streamGanador.IsPremiere);
             }
             else
             {
-                actualizacionParcial = new
+                // No quedó ningún stream corriendo, verificamos si sobrevive por el string legacy viejo
+                bool sobreviveLegacy = !string.IsNullOrEmpty(legacyLiveVideoId) && legacyLiveVideoId != videoId && !vivosActuales.ContainsKey(legacyLiveVideoId);
+
+                if (sobreviveLegacy)
                 {
-                    ChannelLive = false,
-                    ChannelImgLiveUrl = "",
-                    LiveVideoId = "",
-                    LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    IsPremiere = false // Limpiamos el flag porque el canal ya no está en vivo
-                };
-                _logger.LogInformation("Canal {ChannelName} OFF totalmente vía Webhook.", channelName);
+                    actualizacionParcial = new
+                    {
+                        LiveVideoId = legacyLiveVideoId,
+                        LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    };
+                    _logger.LogInformation("Aviso: El canal {ChannelName} sobrevive por Legacy ID: {LegacyId}", channelName, legacyLiveVideoId);
+                }
+                else
+                {
+                    // Apagón total
+                    actualizacionParcial = new
+                    {
+                        ChannelLive = false,
+                        ChannelImgLiveUrl = "",
+                        LiveVideoId = "",
+                        LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                        IsPremiere = false
+                    };
+                    _logger.LogInformation("Canal {ChannelName} OFF totalmente vía Webhook.", channelName);
+                }
             }
         }
 
