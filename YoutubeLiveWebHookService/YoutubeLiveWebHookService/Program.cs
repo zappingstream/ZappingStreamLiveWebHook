@@ -244,17 +244,23 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
         if (esEnVivo)
         {
+            string fechaInicioYouTube =
+                videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"); 
+
             var activeData = new ActiveVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
-                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                AddedAt = fechaInicioYouTube, 
                 ThumbnailUrl = liveImageUrl,
-                IsPremiere = esEstreno // Guardamos el flag en la subcolección
+                IsPremiere = esEstreno
             };
+
             await activeRef.PutAsync(activeData);
 
-            // Actualizamos nuestra lista en memoria para poder calcular el "ganador"
             vivosActuales[videoId] = activeData;
             huboCambiosEnVivos = true;
         }
