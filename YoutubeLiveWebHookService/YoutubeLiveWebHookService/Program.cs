@@ -270,6 +270,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].Title : "Directo finalizado"),
                 EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ScheduledStartTime = vivosActuales[videoId].ScheduledStartTime,
                 ThumbnailUrl = liveImageUrl,
                 WasPremiere = vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].IsPremiere : false
             };
@@ -373,6 +374,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     VideoId = videoId,
                     Title = videoInfo?.Snippet?.Title ?? (upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].Title : "Programación cancelada"),
                     EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    ScheduledStartTime = vivosActuales[videoId].ScheduledStartTime,
                     ThumbnailUrl = liveImageUrl,
                     WasPremiere = upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].IsPremiere : false
                 };
@@ -428,6 +430,7 @@ public class PastVideo
     public string VideoId { get; set; }
     public string Title { get; set; }
     public string EndedAt { get; set; }
+    public string ScheduledStartTime { get; set; }
     public string ThumbnailUrl { get; set; }
     public bool WasPremiere { get; set; }
 }
