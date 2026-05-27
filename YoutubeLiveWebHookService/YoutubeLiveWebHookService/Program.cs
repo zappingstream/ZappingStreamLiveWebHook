@@ -171,19 +171,14 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 1. DETERMINAR EL ESTADO DEL VIDEO
         string broadcastStatus = videoInfo?.Snippet?.LiveBroadcastContent ?? "none";
 
-        // Ya no distinguimos entre "Vivo Real" o "Upcoming Real". 
-        // Ahora, si está en 'live', es un stream en curso (sea directo o estreno).
         bool esEnVivo = broadcastStatus == "live";
         bool esUpcoming = broadcastStatus == "upcoming";
 
-        // Verificamos si tiene una duración real (propio de los estrenos/premieres grabados)
         bool tieneDuracion = videoInfo?.ContentDetails != null &&
                              videoInfo.ContentDetails.Duration != "P0D" &&
                              videoInfo.ContentDetails.Duration != "PT0D";
 
-        // Es un estreno SI está live o upcoming, PERO ya tiene duración
         bool esEstreno = (esEnVivo || esUpcoming) && tieneDuracion;
-
         string liveImageUrl = videoInfo?.Snippet?.Thumbnails?.High?.Url ?? videoInfo?.Snippet?.Thumbnails?.Medium?.Url ?? "";
 
         // 2. IDENTIFICAR EL CANAL
@@ -221,12 +216,10 @@ public class ProcesadorDeVivosBackground : BackgroundService
         var upcomingActuales = canalEnFirebase?.Upcoming ?? new Dictionary<string, UpcomingVideo>();
         string legacyLiveVideoId = canalEnFirebase?.LiveVideoId ?? "";
 
-        // --- EL ESCUDO ANTI-REELS / VODs ---
         bool estabaEnActivos = vivosActuales.ContainsKey(videoId);
         bool eraElVivoLegacy = legacyLiveVideoId == videoId;
         bool estabaEnUpcoming = upcomingActuales.ContainsKey(videoId);
 
-        // Simplificado: Si NO está en vivo, NO es upcoming y NUNCA lo tuvimos registrado, es un VOD clásico.
         if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming)
         {
             _logger.LogInformation("Escudo activado: Registrando actividad por VOD/Reel {VideoId} del canal {ChannelName}.", videoId, channelName);
@@ -238,23 +231,25 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // Referencias directas a las subcarpetas del video
         var activeRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Actives").Child(videoId);
         var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
+        var pastRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Past").Child(videoId); // <-- NUEVA REFERENCIA
 
         object actualizacionParcial = null;
         bool huboCambiosEnVivos = false;
 
+        // 4. GESTIONAR LA SUBCARPETA "ACTIVES" Y TRANSICIONES A "PAST"
         if (esEnVivo)
         {
             string fechaInicioYouTube =
                 videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
                 videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
                 videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"); 
+                DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
             var activeData = new ActiveVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
-                AddedAt = fechaInicioYouTube, 
+                AddedAt = fechaInicioYouTube,
                 ThumbnailUrl = liveImageUrl,
                 IsPremiere = esEstreno
             };
@@ -266,9 +261,21 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else if (estabaEnActivos || eraElVivoLegacy)
         {
+            // El video estaba activo, pero ya no lo está (Finalizó).
             await activeRef.DeleteAsync();
 
-            // Lo quitamos de la lista en memoria
+            // <-- NUEVO: Guardar en Past
+            var pastData = new PastVideo
+            {
+                VideoId = videoId,
+                Title = videoInfo?.Snippet?.Title ?? (vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].Title : "Directo finalizado"),
+                EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                ThumbnailUrl = liveImageUrl,
+                WasPremiere = vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].IsPremiere : false
+            };
+            await pastRef.PutAsync(pastData);
+            _logger.LogInformation("FINALIZADO: El video {VideoId} de {ChannelName} terminó y pasó a Past.", videoId, channelName);
+
             if (vivosActuales.ContainsKey(videoId))
             {
                 vivosActuales.Remove(videoId);
@@ -276,14 +283,12 @@ public class ProcesadorDeVivosBackground : BackgroundService
             huboCambiosEnVivos = true;
         }
 
-        // Si se prendió o se apagó algo, decidimos quién controla el nodo principal del canal
         if (huboCambiosEnVivos)
         {
             var vivosRestantes = vivosActuales.Values.ToList();
 
             if (vivosRestantes.Any())
             {
-                // PRECEDENCIA: Al ordenar booleanos, 'false' (Vivo Real) siempre va antes que 'true' (Estreno).
                 var streamGanador = vivosRestantes
                     .OrderBy(v => v.IsPremiere)
                     .ThenByDescending(v => v.AddedAt)
@@ -303,7 +308,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
             else
             {
-                // No quedó ningún stream corriendo, verificamos si sobrevive por el string legacy viejo
                 bool sobreviveLegacy = !string.IsNullOrEmpty(legacyLiveVideoId) && legacyLiveVideoId != videoId && !vivosActuales.ContainsKey(legacyLiveVideoId);
 
                 if (sobreviveLegacy)
@@ -317,7 +321,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 }
                 else
                 {
-                    // Apagón total
                     actualizacionParcial = new
                     {
                         ChannelLive = false,
@@ -347,7 +350,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 ScheduledStartTime = horaProgramada,
                 ThumbnailUrl = liveImageUrl,
                 AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                IsPremiere = esEstreno // Guardamos el flag en Upcoming
+                IsPremiere = esEstreno
             };
 
             await upcomingRef.PutAsync(upcomingData);
@@ -356,9 +359,25 @@ public class ProcesadorDeVivosBackground : BackgroundService
         else if (estabaEnUpcoming)
         {
             await upcomingRef.DeleteAsync();
+
             if (esEnVivo)
             {
                 _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO.", videoId, channelName);
+                // Nota: Aquí no lo mandamos a Past, porque simplemente hizo la transición lógica a "Actives"
+            }
+            else
+            {
+                // <-- NUEVO: El upcoming desapareció sin volverse en vivo (lo cancelaron/borraron)
+                var pastData = new PastVideo
+                {
+                    VideoId = videoId,
+                    Title = videoInfo?.Snippet?.Title ?? (upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].Title : "Programación cancelada"),
+                    EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    ThumbnailUrl = liveImageUrl,
+                    WasPremiere = upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].IsPremiere : false
+                };
+                await pastRef.PutAsync(pastData);
+                _logger.LogInformation("CANCELADO: El video upcoming {VideoId} de {ChannelName} se canceló y pasó a Past.", videoId, channelName);
             }
         }
     }
@@ -371,7 +390,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
     }
 }
 
-// --- MODELOS DE DATOS ---
 // --- MODELOS DE DATOS ---
 public class FirebaseChannel
 {
@@ -392,6 +410,7 @@ public class FirebaseChannel
     // Colecciones multi-estado
     public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
     public Dictionary<string, ActiveVideo> Actives { get; set; }
+    public Dictionary<string, PastVideo> Past { get; set; } 
 }
 
 public class UpcomingVideo
@@ -401,7 +420,16 @@ public class UpcomingVideo
     public string ScheduledStartTime { get; set; }
     public string ThumbnailUrl { get; set; }
     public string AddedAt { get; set; }
-    public bool IsPremiere { get; set; } // <-- NUEVO
+    public bool IsPremiere { get; set; }
+}
+
+public class PastVideo
+{
+    public string VideoId { get; set; }
+    public string Title { get; set; }
+    public string EndedAt { get; set; }
+    public string ThumbnailUrl { get; set; }
+    public bool WasPremiere { get; set; }
 }
 
 public class ActiveVideo
