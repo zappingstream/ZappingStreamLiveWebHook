@@ -253,8 +253,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 ThumbnailUrl = liveImageUrl,
                 IsPremiere = esEstreno,
 
-                // 👇 NUEVO: Si no fue programado, usamos la fecha de inicio real de YT para que NO quede en nulo
-                ScheduledStartTime = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? fechaInicioYouTube
+                // 👇 CORREGIDO: Queda nulo si YT no lo envía.
+                ScheduledStartTime = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ")
             };
 
             await activeRef.PutAsync(activeData);
@@ -266,20 +266,17 @@ public class ProcesadorDeVivosBackground : BackgroundService
         {
             await activeRef.DeleteAsync();
 
-            // 👇 NUEVO: Cascada de validación. Si Firebase tiene null (por ser dato viejo), buscamos en YT. Si YT no tiene (por ser espontáneo), usamos la fecha de publicación o la actual.
-            string startTimeFallback = (vivosActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(vivosActuales[videoId].ScheduledStartTime))
+            // 👇 CORREGIDO: Tratamos de recuperar el original, si no hay, queda nulo.
+            string scheduledFallback = (vivosActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(vivosActuales[videoId].ScheduledStartTime))
                 ? vivosActuales[videoId].ScheduledStartTime
-                : (videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                   videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                   videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                   DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                : videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
             var pastData = new PastVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].Title : "Directo finalizado"),
                 EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                ScheduledStartTime = startTimeFallback,
+                ScheduledStartTime = scheduledFallback,
                 ThumbnailUrl = liveImageUrl,
                 WasPremiere = vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].IsPremiere : false
             };
@@ -353,8 +350,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 5. GESTIONAR LA SUBCARPETA "UPCOMING" (INCLUIDOS PREMIERES)
         if (esUpcoming)
         {
-            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                                    DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"); // Seguro contra nulos
+            // 👇 CORREGIDO: Queda nulo si no hay fecha, sin fallback al UtcNow.
+            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
             var upcomingData = new UpcomingVideo
             {
@@ -379,19 +376,16 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
             else
             {
-                // Misma cascada de validación para los programados que se cancelan
-                string startTimeFallback = (upcomingActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(upcomingActuales[videoId].ScheduledStartTime))
+                string scheduledFallback = (upcomingActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(upcomingActuales[videoId].ScheduledStartTime))
                     ? upcomingActuales[videoId].ScheduledStartTime
-                    : (videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                       videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                       DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+                    : videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
                 var pastData = new PastVideo
                 {
                     VideoId = videoId,
                     Title = videoInfo?.Snippet?.Title ?? (upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].Title : "Programación cancelada"),
                     EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    ScheduledStartTime = startTimeFallback,
+                    ScheduledStartTime = scheduledFallback,
                     ThumbnailUrl = liveImageUrl,
                     WasPremiere = upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].IsPremiere : false
                 };
