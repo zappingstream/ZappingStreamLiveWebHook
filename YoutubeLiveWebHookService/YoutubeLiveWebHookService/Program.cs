@@ -231,7 +231,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // Referencias directas a las subcarpetas del video
         var activeRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Actives").Child(videoId);
         var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
-        var pastRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Past").Child(videoId); // <-- NUEVA REFERENCIA
+        var pastRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Past").Child(videoId);
 
         object actualizacionParcial = null;
         bool huboCambiosEnVivos = false;
@@ -251,7 +251,10 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
                 AddedAt = fechaInicioYouTube,
                 ThumbnailUrl = liveImageUrl,
-                IsPremiere = esEstreno
+                IsPremiere = esEstreno,
+
+                // 👇 NUEVO: Si no fue programado, usamos la fecha de inicio real de YT para que NO quede en nulo
+                ScheduledStartTime = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? fechaInicioYouTube
             };
 
             await activeRef.PutAsync(activeData);
@@ -261,19 +264,26 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else if (estabaEnActivos || eraElVivoLegacy)
         {
-            // El video estaba activo, pero ya no lo está (Finalizó).
             await activeRef.DeleteAsync();
 
-            // <-- NUEVO: Guardar en Past
+            // 👇 NUEVO: Cascada de validación. Si Firebase tiene null (por ser dato viejo), buscamos en YT. Si YT no tiene (por ser espontáneo), usamos la fecha de publicación o la actual.
+            string startTimeFallback = (vivosActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(vivosActuales[videoId].ScheduledStartTime))
+                ? vivosActuales[videoId].ScheduledStartTime
+                : (videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                   videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                   videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                   DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+
             var pastData = new PastVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].Title : "Directo finalizado"),
                 EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                ScheduledStartTime = vivosActuales[videoId].ScheduledStartTime,
+                ScheduledStartTime = startTimeFallback,
                 ThumbnailUrl = liveImageUrl,
                 WasPremiere = vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].IsPremiere : false
             };
+
             await pastRef.PutAsync(pastData);
             _logger.LogInformation("FINALIZADO: El video {VideoId} de {ChannelName} terminó y pasó a Past.", videoId, channelName);
 
@@ -343,7 +353,9 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 5. GESTIONAR LA SUBCARPETA "UPCOMING" (INCLUIDOS PREMIERES)
         if (esUpcoming)
         {
-            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ?? "";
+            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                                    DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"); // Seguro contra nulos
+
             var upcomingData = new UpcomingVideo
             {
                 VideoId = videoId,
@@ -364,20 +376,26 @@ public class ProcesadorDeVivosBackground : BackgroundService
             if (esEnVivo)
             {
                 _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO.", videoId, channelName);
-                // Nota: Aquí no lo mandamos a Past, porque simplemente hizo la transición lógica a "Actives"
             }
             else
             {
-                // <-- NUEVO: El upcoming desapareció sin volverse en vivo (lo cancelaron/borraron)
+                // Misma cascada de validación para los programados que se cancelan
+                string startTimeFallback = (upcomingActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(upcomingActuales[videoId].ScheduledStartTime))
+                    ? upcomingActuales[videoId].ScheduledStartTime
+                    : (videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                       videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
+                       DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+
                 var pastData = new PastVideo
                 {
                     VideoId = videoId,
                     Title = videoInfo?.Snippet?.Title ?? (upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].Title : "Programación cancelada"),
                     EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    ScheduledStartTime = vivosActuales[videoId].ScheduledStartTime,
+                    ScheduledStartTime = startTimeFallback,
                     ThumbnailUrl = liveImageUrl,
                     WasPremiere = upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].IsPremiere : false
                 };
+
                 await pastRef.PutAsync(pastData);
                 _logger.LogInformation("CANCELADO: El video upcoming {VideoId} de {ChannelName} se canceló y pasó a Past.", videoId, channelName);
             }
