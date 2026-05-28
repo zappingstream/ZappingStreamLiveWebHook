@@ -266,19 +266,23 @@ public class ProcesadorDeVivosBackground : BackgroundService
         {
             await activeRef.DeleteAsync();
 
-            // 👇 CORREGIDO: Tratamos de recuperar el original, si no hay, queda nulo.
-            string scheduledFallback = (vivosActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(vivosActuales[videoId].ScheduledStartTime))
-                ? vivosActuales[videoId].ScheduledStartTime
-                : videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            // Extraemos el objeto de forma segura. Si no está, videoActivo queda en null sin romper nada.
+            vivosActuales.TryGetValue(videoId, out var videoActivo);
+
+            // Evaluamos con el operador null-condicional y agregamos ActualStartTime al final
+            string scheduledFallback = !string.IsNullOrEmpty(videoActivo?.ScheduledStartTime)
+                ? videoActivo.ScheduledStartTime
+                : (videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                   ?? videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ"));
 
             var pastData = new PastVideo
             {
                 VideoId = videoId,
-                Title = videoInfo?.Snippet?.Title ?? (vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].Title : "Directo finalizado"),
+                Title = videoInfo?.Snippet?.Title ?? videoActivo?.Title ?? "Directo finalizado",
                 EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 ScheduledStartTime = scheduledFallback,
                 ThumbnailUrl = liveImageUrl,
-                WasPremiere = vivosActuales.ContainsKey(videoId) ? vivosActuales[videoId].IsPremiere : false
+                WasPremiere = videoActivo?.IsPremiere ?? false
             };
 
             await pastRef.PutAsync(pastData);
