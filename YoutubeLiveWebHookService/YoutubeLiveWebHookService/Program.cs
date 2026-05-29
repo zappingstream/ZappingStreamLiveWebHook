@@ -168,6 +168,13 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
     private async Task ActualizarFirebaseParaVideoAsync(string videoId, string channelIdInfo, Google.Apis.YouTube.v3.Data.Video videoInfo)
     {
+        // EXTRACCIÓN DE TODOS LOS TIEMPOS DISPONIBLES (Formato ISO 8601 UTC)
+        string publishedAt = videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string scheduledStart = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string actualStart = videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string actualEnd = videoInfo?.LiveStreamingDetails?.ActualEndTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+        string sysTimeNow = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
         // 1. DETERMINAR EL ESTADO DEL VIDEO
         string broadcastStatus = videoInfo?.Snippet?.LiveBroadcastContent ?? "none";
 
@@ -223,7 +230,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
         if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming)
         {
             _logger.LogInformation("Escudo activado: Registrando actividad por VOD/Reel {VideoId} del canal {ChannelName}.", videoId, channelName);
-            var actualizacionActividad = new { LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") };
+            var actualizacionActividad = new { LastActivityAt = sysTimeNow };
             await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionActividad);
             return;
         }
@@ -239,22 +246,19 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 4. GESTIONAR LA SUBCARPETA "ACTIVES" Y TRANSICIONES A "PAST"
         if (esEnVivo)
         {
-            string fechaInicioYouTube =
-                videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ") ??
-                DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-
             var activeData = new ActiveVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
-                AddedAt = fechaInicioYouTube,
                 ThumbnailUrl = liveImageUrl,
                 IsPremiere = esEstreno,
 
-                // 👇 CORREGIDO: Queda nulo si YT no lo envía.
-                ScheduledStartTime = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                // Tiempos
+                PublishedAt = publishedAt,
+                ScheduledStartTime = scheduledStart,
+                ActualStartTime = actualStart ?? sysTimeNow, // Resguardo si YT tarda en mandarlo
+                ActualEndTime = actualEnd,
+                AddedAt = sysTimeNow
             };
 
             await activeRef.PutAsync(activeData);
@@ -265,24 +269,26 @@ public class ProcesadorDeVivosBackground : BackgroundService
         else if (estabaEnActivos || eraElVivoLegacy)
         {
             await activeRef.DeleteAsync();
-
-            // Extraemos el objeto de forma segura. Si no está, videoActivo queda en null sin romper nada.
             vivosActuales.TryGetValue(videoId, out var videoActivo);
 
-            // Evaluamos con el operador null-condicional y agregamos ActualStartTime al final
-            string scheduledFallback = !string.IsNullOrEmpty(videoActivo?.ScheduledStartTime)
-                ? videoActivo.ScheduledStartTime
-                : (videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ")
-                   ?? videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+            // Resguardamos los tiempos viejos por si el API de YT no los trae más
+            string fallbackPublished = publishedAt ?? videoActivo?.PublishedAt;
+            string fallbackScheduled = scheduledStart ?? videoActivo?.ScheduledStartTime;
+            string fallbackActualStart = actualStart ?? videoActivo?.ActualStartTime;
 
             var pastData = new PastVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? videoActivo?.Title ?? "Directo finalizado",
-                EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                ScheduledStartTime = scheduledFallback,
                 ThumbnailUrl = liveImageUrl,
-                WasPremiere = videoActivo?.IsPremiere ?? false
+                WasPremiere = videoActivo?.IsPremiere ?? false,
+
+                // Tiempos
+                PublishedAt = fallbackPublished,
+                ScheduledStartTime = fallbackScheduled,
+                ActualStartTime = fallbackActualStart,
+                ActualEndTime = actualEnd ?? sysTimeNow,
+                EndedAt = sysTimeNow
             };
 
             await pastRef.PutAsync(pastData);
@@ -311,7 +317,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     ChannelLive = true,
                     LiveVideoId = streamGanador.VideoId,
                     ChannelImgLiveUrl = streamGanador.ThumbnailUrl,
-                    LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    LastActivityAt = sysTimeNow,
                     IsPremiere = streamGanador.IsPremiere
                 };
 
@@ -327,7 +333,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                     actualizacionParcial = new
                     {
                         LiveVideoId = legacyLiveVideoId,
-                        LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                        LastActivityAt = sysTimeNow
                     };
                     _logger.LogInformation("Aviso: El canal {ChannelName} sobrevive por Legacy ID: {LegacyId}", channelName, legacyLiveVideoId);
                 }
@@ -338,7 +344,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
                         ChannelLive = false,
                         ChannelImgLiveUrl = "",
                         LiveVideoId = "",
-                        LastActivityAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                        LastActivityAt = sysTimeNow,
                         IsPremiere = false
                     };
                     _logger.LogInformation("Canal {ChannelName} OFF totalmente vía Webhook.", channelName);
@@ -354,17 +360,19 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 5. GESTIONAR LA SUBCARPETA "UPCOMING" (INCLUIDOS PREMIERES)
         if (esUpcoming)
         {
-            // 👇 CORREGIDO: Queda nulo si no hay fecha, sin fallback al UtcNow.
-            string horaProgramada = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
-
             var upcomingData = new UpcomingVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno Programado" : "Directo Programado"),
-                ScheduledStartTime = horaProgramada,
                 ThumbnailUrl = liveImageUrl,
-                AddedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                IsPremiere = esEstreno
+                IsPremiere = esEstreno,
+
+                // Tiempos
+                PublishedAt = publishedAt,
+                ScheduledStartTime = scheduledStart,
+                ActualStartTime = actualStart,
+                ActualEndTime = actualEnd,
+                AddedAt = sysTimeNow
             };
 
             await upcomingRef.PutAsync(upcomingData);
@@ -380,18 +388,24 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
             else
             {
-                string scheduledFallback = (upcomingActuales.ContainsKey(videoId) && !string.IsNullOrEmpty(upcomingActuales[videoId].ScheduledStartTime))
-                    ? upcomingActuales[videoId].ScheduledStartTime
-                    : videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
+                upcomingActuales.TryGetValue(videoId, out var videoUpcoming);
+
+                string fallbackPublished = publishedAt ?? videoUpcoming?.PublishedAt;
+                string fallbackScheduled = scheduledStart ?? videoUpcoming?.ScheduledStartTime;
 
                 var pastData = new PastVideo
                 {
                     VideoId = videoId,
-                    Title = videoInfo?.Snippet?.Title ?? (upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].Title : "Programación cancelada"),
-                    EndedAt = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                    ScheduledStartTime = scheduledFallback,
+                    Title = videoInfo?.Snippet?.Title ?? videoUpcoming?.Title ?? "Programación cancelada",
                     ThumbnailUrl = liveImageUrl,
-                    WasPremiere = upcomingActuales.ContainsKey(videoId) ? upcomingActuales[videoId].IsPremiere : false
+                    WasPremiere = videoUpcoming?.IsPremiere ?? false,
+
+                    // Tiempos
+                    PublishedAt = fallbackPublished,
+                    ScheduledStartTime = fallbackScheduled,
+                    ActualStartTime = actualStart,
+                    ActualEndTime = actualEnd ?? sysTimeNow,
+                    EndedAt = sysTimeNow
                 };
 
                 await pastRef.PutAsync(pastData);
@@ -409,6 +423,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
 }
 
 // --- MODELOS DE DATOS ---
+
 public class FirebaseChannel
 {
     public string ChannelName { get; set; }
@@ -423,40 +438,55 @@ public class FirebaseChannel
     public bool ChannelLive { get; set; }
     public string LiveVideoId { get; set; }
     public string LastActivityAt { get; set; }
-    public bool IsPremiere { get; set; } // <-- NUEVO
+    public bool IsPremiere { get; set; }
 
     // Colecciones multi-estado
     public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
     public Dictionary<string, ActiveVideo> Actives { get; set; }
-    public Dictionary<string, PastVideo> Past { get; set; } 
+    public Dictionary<string, PastVideo> Past { get; set; }
 }
 
 public class UpcomingVideo
 {
     public string VideoId { get; set; }
     public string Title { get; set; }
-    public string ScheduledStartTime { get; set; }
     public string ThumbnailUrl { get; set; }
-    public string AddedAt { get; set; }
     public bool IsPremiere { get; set; }
-}
 
-public class PastVideo
-{
-    public string VideoId { get; set; }
-    public string Title { get; set; }
-    public string EndedAt { get; set; }
+    // Tiempos
+    public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
-    public string ThumbnailUrl { get; set; }
-    public bool WasPremiere { get; set; }
+    public string ActualStartTime { get; set; }
+    public string ActualEndTime { get; set; }
+    public string AddedAt { get; set; }
 }
 
 public class ActiveVideo
 {
     public string VideoId { get; set; }
     public string Title { get; set; }
-    public string ScheduledStartTime { get; set; }
     public string ThumbnailUrl { get; set; }
+    public bool IsPremiere { get; set; }
+
+    // Tiempos
+    public string PublishedAt { get; set; }
+    public string ScheduledStartTime { get; set; }
+    public string ActualStartTime { get; set; }
+    public string ActualEndTime { get; set; }
     public string AddedAt { get; set; }
-    public bool IsPremiere { get; set; } // <-- NUEVO
+}
+
+public class PastVideo
+{
+    public string VideoId { get; set; }
+    public string Title { get; set; }
+    public string ThumbnailUrl { get; set; }
+    public bool WasPremiere { get; set; }
+
+    // Tiempos
+    public string PublishedAt { get; set; }
+    public string ScheduledStartTime { get; set; }
+    public string ActualStartTime { get; set; }
+    public string ActualEndTime { get; set; }
+    public string EndedAt { get; set; }
 }
