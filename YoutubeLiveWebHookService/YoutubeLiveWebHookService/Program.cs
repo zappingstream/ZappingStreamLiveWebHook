@@ -203,7 +203,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
             var canalAfectado = canalesEnFirebaseBuscador.FirstOrDefault(c =>
                 c.Object.LiveVideoId == videoId ||
                 (c.Object.Actives != null && c.Object.Actives.ContainsKey(videoId)) ||
-                (c.Object.Upcoming != null && c.Object.Upcoming.ContainsKey(videoId)));
+                (c.Object.Upcoming != null && c.Object.Upcoming.ContainsKey(videoId)) ||
+                (c.Object.Past != null && c.Object.Past.ContainsKey(videoId))); // NUEVO: Buscar también en Past
 
             if (canalAfectado != null)
             {
@@ -221,13 +222,16 @@ public class ProcesadorDeVivosBackground : BackgroundService
         var canalEnFirebase = await _firebaseClient.Child("Channels").Child(firebaseKey).OnceSingleAsync<FirebaseChannel>();
         var vivosActuales = canalEnFirebase?.Actives ?? new Dictionary<string, ActiveVideo>();
         var upcomingActuales = canalEnFirebase?.Upcoming ?? new Dictionary<string, UpcomingVideo>();
+        var pastActuales = canalEnFirebase?.Past ?? new Dictionary<string, PastVideo>(); // NUEVO: Mapear Pasados
         string legacyLiveVideoId = canalEnFirebase?.LiveVideoId ?? "";
 
         bool estabaEnActivos = vivosActuales.ContainsKey(videoId);
         bool eraElVivoLegacy = legacyLiveVideoId == videoId;
         bool estabaEnUpcoming = upcomingActuales.ContainsKey(videoId);
+        bool estabaEnPast = pastActuales.ContainsKey(videoId); // NUEVO: Verificar si ya existía en Past
 
-        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming)
+        // ESCUDO MODIFICADO: Solo si no es vivo/upcoming y NO existe en NINGUNA subcarpeta
+        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming && !estabaEnPast)
         {
             _logger.LogInformation("Escudo activado: Registrando actividad por VOD/Reel {VideoId} del canal {ChannelName}.", videoId, channelName);
             var actualizacionActividad = new { LastActivityAt = sysTimeNow };
@@ -299,6 +303,28 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 vivosActuales.Remove(videoId);
             }
             huboCambiosEnVivos = true;
+        }
+        else if (estabaEnPast) 
+        {
+            pastActuales.TryGetValue(videoId, out var videoPast);
+
+            var pastData = new PastVideo
+            {
+                VideoId = videoId,
+                Title = videoInfo?.Snippet?.Title ?? videoPast?.Title ?? "Directo finalizado",
+                ThumbnailUrl = liveImageUrl != "" ? liveImageUrl : videoPast?.ThumbnailUrl,
+                WasPremiere = videoPast?.WasPremiere ?? false,
+
+                // Tiempos (mantenemos los anteriores si YT no los manda nuevos)
+                PublishedAt = publishedAt ?? videoPast?.PublishedAt,
+                ScheduledStartTime = scheduledStart ?? videoPast?.ScheduledStartTime,
+                ActualStartTime = actualStart ?? videoPast?.ActualStartTime,
+                ActualEndTime = actualEnd ?? videoPast?.ActualEndTime,
+                EndedAt = videoPast?.EndedAt ?? sysTimeNow
+            };
+
+            await pastRef.PutAsync(pastData);
+            _logger.LogInformation("ACTUALIZACIÓN POST-VIVO: El video {VideoId} de {ChannelName} actualizó su data en Past.", videoId, channelName);
         }
 
         if (huboCambiosEnVivos)
