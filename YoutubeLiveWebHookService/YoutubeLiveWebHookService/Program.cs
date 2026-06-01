@@ -100,7 +100,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
         ILogger<ProcesadorDeVivosBackground> logger)
     {
         _lectorCola = lectorCola;
-        _channelsCollection = database.GetCollection<ZappingChannel>("Channels");
+        _channelsCollection = database.GetCollection<ZappingChannel>("channels");
         _youtubeService = youtubeService;
         _logger = logger;
     }
