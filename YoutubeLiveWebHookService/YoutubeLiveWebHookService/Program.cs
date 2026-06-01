@@ -1,8 +1,9 @@
-using Firebase.Database;
-using Firebase.Database.Query;
 using Google.Apis.Services;
 using Google.Apis.YouTube.v3;
 using Microsoft.AspNetCore.Mvc;
+using MongoDB.Bson;
+using MongoDB.Bson.Serialization.Attributes;
+using MongoDB.Driver;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using System.Xml.Linq;
@@ -10,20 +11,19 @@ using System.Xml.Linq;
 var builder = WebApplication.CreateBuilder(args);
 
 // 1. CONFIGURACIONES
-string firebaseUrl = builder.Configuration["Firebase:Url"] ?? "https://zappingstreaming-default-rtdb.firebaseio.com/";
+string mongoUri = builder.Configuration["MongoDB:ConnectionString"] ?? "mongodb+srv://...";
+string dbName = builder.Configuration["MongoDB:DatabaseName"] ?? "ZappingStreaming";
 string ytApiKey = builder.Configuration["YouTube:ApiKey"] ?? "";
-string firebaseSecret = builder.Configuration["Firebase:Secret"] ?? "";
 
 // 2. INYECCIÓN DE DEPENDENCIAS
-builder.Services.AddSingleton(new FirebaseClient(firebaseUrl, new FirebaseOptions
-{
-    AuthTokenAsyncFactory = () => Task.FromResult(firebaseSecret)
-}));
+var mongoClient = new MongoClient(mongoUri);
+var database = mongoClient.GetDatabase(dbName);
+builder.Services.AddSingleton(database);
 
 builder.Services.AddSingleton(new YouTubeService(new BaseClientService.Initializer()
 {
     ApiKey = ytApiKey,
-    ApplicationName = "ZappingStreamingWorker"
+    ApplicationName = "ZappingStreamingWebhook"
 }));
 
 var channel = Channel.CreateUnbounded<VideoEvent>();
@@ -65,8 +65,7 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
                 string videoId = videoIdElement.Value;
                 string channelId = channelIdElement?.Value ?? "";
 
-                logger.LogInformation("¡Aviso recibido! ID: {VideoId}. Mandando a la cola de procesamiento...", videoId);
-
+                logger.LogInformation("¡Aviso recibido! ID: {VideoId}. Mandando a la cola...", videoId);
                 await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
             }
         }
@@ -90,18 +89,18 @@ public record VideoEvent(string VideoId, string ChannelId);
 public class ProcesadorDeVivosBackground : BackgroundService
 {
     private readonly ChannelReader<VideoEvent> _lectorCola;
-    private readonly FirebaseClient _firebaseClient;
+    private readonly IMongoCollection<ZappingChannel> _channelsCollection;
     private readonly YouTubeService _youtubeService;
     private readonly ILogger<ProcesadorDeVivosBackground> _logger;
 
     public ProcesadorDeVivosBackground(
         ChannelReader<VideoEvent> lectorCola,
-        FirebaseClient firebaseClient,
+        IMongoDatabase database,
         YouTubeService youtubeService,
         ILogger<ProcesadorDeVivosBackground> logger)
     {
         _lectorCola = lectorCola;
-        _firebaseClient = firebaseClient;
+        _channelsCollection = database.GetCollection<ZappingChannel>("Channels");
         _youtubeService = youtubeService;
         _logger = logger;
     }
@@ -114,7 +113,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
         {
             if (await _lectorCola.WaitToReadAsync(stoppingToken))
             {
-                await Task.Delay(60000, stoppingToken);
+                await Task.Delay(60000, stoppingToken); // Espera de 1 min para agrupar
 
                 while (buffer.Count < 50 && _lectorCola.TryRead(out var videoEvent))
                 {
@@ -126,8 +125,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
 
                 if (buffer.Any())
                 {
-                    _logger.LogInformation("Procesando {Cantidad} webhooks agrupados en el último minuto.", buffer.Count);
-                    await Task.Delay(30000, stoppingToken);
+                    _logger.LogInformation("Procesando {Cantidad} webhooks agrupados.", buffer.Count);
+                    await Task.Delay(30000, stoppingToken); // Gap adicional para dejar que YT propague la metadata
                     await ProcesarBatchAsync(buffer);
                     buffer.Clear();
                 }
@@ -140,7 +139,6 @@ public class ProcesadorDeVivosBackground : BackgroundService
         try
         {
             string idsJuntos = string.Join(",", batch.Select(v => v.VideoId));
-
             var videoRequest = _youtubeService.Videos.List("snippet,contentDetails,liveStreamingDetails");
             videoRequest.Id = idsJuntos;
             var videoResponse = await videoRequest.ExecuteAsync();
@@ -152,334 +150,289 @@ public class ProcesadorDeVivosBackground : BackgroundService
                 try
                 {
                     var videoInfo = videosEncontrados.FirstOrDefault(v => v.Id == evento.VideoId);
-                    await ActualizarFirebaseParaVideoAsync(evento.VideoId, evento.ChannelId, videoInfo);
+                    await ActualizarMongoParaVideoAsync(evento.VideoId, evento.ChannelId, videoInfo);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Error aislando el canal {ChannelId} en el batch.", evento.ChannelId);
+                    _logger.LogError(ex, "Error procesando el video {VideoId} del canal {ChannelId}.", evento.VideoId, evento.ChannelId);
                 }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error grave procesando la lista completa de YouTube");
+            _logger.LogError(ex, "Error grave procesando el batch de YouTube.");
         }
     }
 
-    private async Task ActualizarFirebaseParaVideoAsync(string videoId, string channelIdInfo, Google.Apis.YouTube.v3.Data.Video videoInfo)
+    private async Task ActualizarMongoParaVideoAsync(string videoId, string channelIdInfo, Google.Apis.YouTube.v3.Data.Video videoInfo)
     {
-        // EXTRACCIÓN DE TODOS LOS TIEMPOS DISPONIBLES (Formato ISO 8601 UTC)
+        string sysTimeNow = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+        // 1. EXTRACCIÓN DE DATOS DE YOUTUBE
         string publishedAt = videoInfo?.Snippet?.PublishedAtDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
         string scheduledStart = videoInfo?.LiveStreamingDetails?.ScheduledStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
         string actualStart = videoInfo?.LiveStreamingDetails?.ActualStartTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
         string actualEnd = videoInfo?.LiveStreamingDetails?.ActualEndTimeDateTimeOffset?.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        string sysTimeNow = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
 
-        // 1. DETERMINAR EL ESTADO DEL VIDEO
         string broadcastStatus = videoInfo?.Snippet?.LiveBroadcastContent ?? "none";
-
         bool esEnVivo = broadcastStatus == "live";
         bool esUpcoming = broadcastStatus == "upcoming";
-
         bool tieneDuracion = videoInfo?.ContentDetails != null &&
                              videoInfo.ContentDetails.Duration != "P0D" &&
                              videoInfo.ContentDetails.Duration != "PT0D";
-
         bool esEstreno = (esEnVivo || esUpcoming) && tieneDuracion;
         string liveImageUrl = videoInfo?.Snippet?.Thumbnails?.High?.Url ?? videoInfo?.Snippet?.Thumbnails?.Medium?.Url ?? "";
 
-        // 2. IDENTIFICAR EL CANAL
-        string channelName = "";
-        string firebaseKey = "";
+        // 2. RECUPERAR EL CANAL DE MONGO
+        // Ahora usamos el ID de YouTube (UC...) directamente
+        string targetChannelId = videoInfo?.Snippet?.ChannelId ?? channelIdInfo;
 
-        if (videoInfo != null)
+        ZappingChannel canal;
+
+        if (!string.IsNullOrEmpty(targetChannelId))
         {
-            channelName = videoInfo.Snippet.ChannelTitle;
-            firebaseKey = SanitizarKeyFirebase(channelName);
+            canal = await _channelsCollection.Find(c => c.Id == targetChannelId).FirstOrDefaultAsync();
         }
         else
         {
-            var canalesEnFirebaseBuscador = await _firebaseClient.Child("Channels").OnceAsync<FirebaseChannel>();
-            var canalAfectado = canalesEnFirebaseBuscador.FirstOrDefault(c =>
-                c.Object.LiveVideoId == videoId ||
-                (c.Object.Actives != null && c.Object.Actives.ContainsKey(videoId)) ||
-                (c.Object.Upcoming != null && c.Object.Upcoming.ContainsKey(videoId)) ||
-                (c.Object.Past != null && c.Object.Past.ContainsKey(videoId))); // NUEVO: Buscar también en Past
-
-            if (canalAfectado != null)
-            {
-                firebaseKey = canalAfectado.Key;
-                channelName = canalAfectado.Object.ChannelName ?? firebaseKey;
-            }
-            else
-            {
-                _logger.LogWarning("Webhook inútil: El video {VideoId} no existe en YT ni está registrado en Firebase.", videoId);
-                return;
-            }
+            // Fallback: buscar el video en los diccionarios de toda la base (menos eficiente pero a prueba de balas)
+            canal = await _channelsCollection.Find(c =>
+                c.LiveVideoId == videoId ||
+                c.Actives.ContainsKey(videoId) ||
+                c.Upcoming.ContainsKey(videoId) ||
+                c.Past.ContainsKey(videoId)
+            ).FirstOrDefaultAsync();
         }
 
-        // 3. LEER EL ESTADO ACTUAL DEL CANAL EN FIREBASE
-        var canalEnFirebase = await _firebaseClient.Child("Channels").Child(firebaseKey).OnceSingleAsync<FirebaseChannel>();
-        var vivosActuales = canalEnFirebase?.Actives ?? new Dictionary<string, ActiveVideo>();
-        var upcomingActuales = canalEnFirebase?.Upcoming ?? new Dictionary<string, UpcomingVideo>();
-        var pastActuales = canalEnFirebase?.Past ?? new Dictionary<string, PastVideo>(); // NUEVO: Mapear Pasados
-        string legacyLiveVideoId = canalEnFirebase?.LiveVideoId ?? "";
-
-        bool estabaEnActivos = vivosActuales.ContainsKey(videoId);
-        bool eraElVivoLegacy = legacyLiveVideoId == videoId;
-        bool estabaEnUpcoming = upcomingActuales.ContainsKey(videoId);
-        bool estabaEnPast = pastActuales.ContainsKey(videoId); // NUEVO: Verificar si ya existía en Past
-
-        // ESCUDO MODIFICADO: Solo si no es vivo/upcoming y NO existe en NINGUNA subcarpeta
-        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming && !estabaEnPast)
+        if (canal == null)
         {
-            _logger.LogInformation("Escudo activado: Registrando actividad por VOD/Reel {VideoId} del canal {ChannelName}.", videoId, channelName);
-            var actualizacionActividad = new { LastActivityAt = sysTimeNow };
-            await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionActividad);
+            _logger.LogWarning("Webhook ignorado: El canal {ChannelId} no está registrado en la base de datos.", targetChannelId);
             return;
         }
 
-        // Referencias directas a las subcarpetas del video
-        var activeRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Actives").Child(videoId);
-        var upcomingRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Upcoming").Child(videoId);
-        var pastRef = _firebaseClient.Child("Channels").Child(firebaseKey).Child("Past").Child(videoId);
+        // Inicializar diccionarios si vienen null de la BD
+        canal.Actives ??= new Dictionary<string, ActiveVideo>();
+        canal.Upcoming ??= new Dictionary<string, UpcomingVideo>();
+        canal.Past ??= new Dictionary<string, PastVideo>();
 
-        object actualizacionParcial = null;
+        bool estabaEnActivos = canal.Actives.ContainsKey(videoId);
+        bool eraElVivoLegacy = canal.LiveVideoId == videoId;
+        bool estabaEnUpcoming = canal.Upcoming.ContainsKey(videoId);
+        bool estabaEnPast = canal.Past.ContainsKey(videoId);
+
+        // ESCUDO: Actividad por VOD/Reel
+        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming && !estabaEnPast)
+        {
+            _logger.LogInformation("Escudo activado: VOD/Reel detectado en {ChannelName}. Solo actualizo actividad.", canal.ChannelName);
+            var update = Builders<ZappingChannel>.Update.Set(c => c.LastActivityAt, sysTimeNow);
+            await _channelsCollection.UpdateOneAsync(c => c.Id == canal.Id, update);
+            return;
+        }
+
         bool huboCambiosEnVivos = false;
 
-        // 4. GESTIONAR LA SUBCARPETA "ACTIVES" Y TRANSICIONES A "PAST"
+        // 3. GESTIONAR "ACTIVES" Y TRANSICIONES A "PAST"
         if (esEnVivo)
         {
-            var activeData = new ActiveVideo
+            canal.Actives[videoId] = new ActiveVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
                 ThumbnailUrl = liveImageUrl,
                 IsPremiere = esEstreno,
-
-                // Tiempos
                 PublishedAt = publishedAt,
                 ScheduledStartTime = scheduledStart,
-                ActualStartTime = actualStart ?? sysTimeNow, // Resguardo si YT tarda en mandarlo
+                ActualStartTime = actualStart ?? sysTimeNow,
                 ActualEndTime = actualEnd,
                 AddedAt = sysTimeNow
             };
-
-            await activeRef.PutAsync(activeData);
-
-            vivosActuales[videoId] = activeData;
             huboCambiosEnVivos = true;
         }
         else if (estabaEnActivos || eraElVivoLegacy)
         {
-            await activeRef.DeleteAsync();
-            vivosActuales.TryGetValue(videoId, out var videoActivo);
+            canal.Actives.TryGetValue(videoId, out var videoActivo);
+            canal.Actives.Remove(videoId);
 
-            // Resguardamos los tiempos viejos por si el API de YT no los trae más
-            string fallbackPublished = publishedAt ?? videoActivo?.PublishedAt;
-            string fallbackScheduled = scheduledStart ?? videoActivo?.ScheduledStartTime;
-            string fallbackActualStart = actualStart ?? videoActivo?.ActualStartTime;
-
-            var pastData = new PastVideo
+            canal.Past[videoId] = new PastVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? videoActivo?.Title ?? "Directo finalizado",
                 ThumbnailUrl = liveImageUrl,
                 WasPremiere = videoActivo?.IsPremiere ?? false,
-
-                // Tiempos
-                PublishedAt = fallbackPublished,
-                ScheduledStartTime = fallbackScheduled,
-                ActualStartTime = fallbackActualStart,
+                PublishedAt = publishedAt ?? videoActivo?.PublishedAt,
+                ScheduledStartTime = scheduledStart ?? videoActivo?.ScheduledStartTime,
+                ActualStartTime = actualStart ?? videoActivo?.ActualStartTime,
                 ActualEndTime = actualEnd ?? sysTimeNow,
                 EndedAt = sysTimeNow
             };
 
-            await pastRef.PutAsync(pastData);
-            _logger.LogInformation("FINALIZADO: El video {VideoId} de {ChannelName} terminó y pasó a Past.", videoId, channelName);
-
-            if (vivosActuales.ContainsKey(videoId))
-            {
-                vivosActuales.Remove(videoId);
-            }
+            _logger.LogInformation("FINALIZADO: El video {VideoId} de {ChannelName} pasó a Past.", videoId, canal.ChannelName);
             huboCambiosEnVivos = true;
         }
-        else if (estabaEnPast) 
+        else if (estabaEnPast)
         {
-            pastActuales.TryGetValue(videoId, out var videoPast);
-
-            var pastData = new PastVideo
+            canal.Past.TryGetValue(videoId, out var videoPast);
+            canal.Past[videoId] = new PastVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? videoPast?.Title ?? "Directo finalizado",
-                ThumbnailUrl = liveImageUrl != "" ? liveImageUrl : videoPast?.ThumbnailUrl,
+                ThumbnailUrl = !string.IsNullOrEmpty(liveImageUrl) ? liveImageUrl : videoPast?.ThumbnailUrl,
                 WasPremiere = videoPast?.WasPremiere ?? false,
-
-                // Tiempos (mantenemos los anteriores si YT no los manda nuevos)
                 PublishedAt = publishedAt ?? videoPast?.PublishedAt,
                 ScheduledStartTime = scheduledStart ?? videoPast?.ScheduledStartTime,
                 ActualStartTime = actualStart ?? videoPast?.ActualStartTime,
                 ActualEndTime = actualEnd ?? videoPast?.ActualEndTime,
                 EndedAt = videoPast?.EndedAt ?? sysTimeNow
             };
-
-            await pastRef.PutAsync(pastData);
-            _logger.LogInformation("ACTUALIZACIÓN POST-VIVO: El video {VideoId} de {ChannelName} actualizó su data en Past.", videoId, channelName);
         }
 
-        if (huboCambiosEnVivos)
-        {
-            var vivosRestantes = vivosActuales.Values.ToList();
-
-            if (vivosRestantes.Any())
-            {
-                var streamGanador = vivosRestantes
-                    .OrderBy(v => v.IsPremiere)
-                    .ThenByDescending(v => v.ActualStartTime ?? v.AddedAt)
-                    .First();
-
-                actualizacionParcial = new
-                {
-                    ChannelLive = true,
-                    LiveVideoId = streamGanador.VideoId,
-                    ChannelImgLiveUrl = streamGanador.ThumbnailUrl,
-                    LastActivityAt = sysTimeNow,
-                    IsPremiere = streamGanador.IsPremiere
-                };
-
-                _logger.LogInformation("Canal {ChannelName} reevaluado. Stream principal elegido: {GanadorId} (¿Es Estreno?: {EsEstreno})",
-                    channelName, streamGanador.VideoId, streamGanador.IsPremiere);
-            }
-            else
-            {
-                bool sobreviveLegacy = !string.IsNullOrEmpty(legacyLiveVideoId) && legacyLiveVideoId != videoId && !vivosActuales.ContainsKey(legacyLiveVideoId);
-
-                if (sobreviveLegacy)
-                {
-                    actualizacionParcial = new
-                    {
-                        LiveVideoId = legacyLiveVideoId,
-                        LastActivityAt = sysTimeNow
-                    };
-                    _logger.LogInformation("Aviso: El canal {ChannelName} sobrevive por Legacy ID: {LegacyId}", channelName, legacyLiveVideoId);
-                }
-                else
-                {
-                    actualizacionParcial = new
-                    {
-                        ChannelLive = false,
-                        ChannelImgLiveUrl = "",
-                        LiveVideoId = "",
-                        LastActivityAt = sysTimeNow,
-                        IsPremiere = false
-                    };
-                    _logger.LogInformation("Canal {ChannelName} OFF totalmente vía Webhook.", channelName);
-                }
-            }
-        }
-
-        if (actualizacionParcial != null)
-        {
-            await _firebaseClient.Child("Channels").Child(firebaseKey).PatchAsync(actualizacionParcial);
-        }
-
-        // 5. GESTIONAR LA SUBCARPETA "UPCOMING" (INCLUIDOS PREMIERES)
+        // 4. GESTIONAR "UPCOMING"
         if (esUpcoming)
         {
-            var upcomingData = new UpcomingVideo
+            canal.Upcoming[videoId] = new UpcomingVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno Programado" : "Directo Programado"),
                 ThumbnailUrl = liveImageUrl,
                 IsPremiere = esEstreno,
-
-                // Tiempos
                 PublishedAt = publishedAt,
                 ScheduledStartTime = scheduledStart,
                 ActualStartTime = actualStart,
                 ActualEndTime = actualEnd,
                 AddedAt = sysTimeNow
             };
-
-            await upcomingRef.PutAsync(upcomingData);
-            _logger.LogInformation("PROGRAMADO: {ChannelName} tiene un upcoming ({VideoId}). ¿Es Estreno?: {EsEstreno}", channelName, videoId, esEstreno);
+            _logger.LogInformation("PROGRAMADO: {ChannelName} tiene upcoming ({VideoId}).", canal.ChannelName, videoId);
         }
         else if (estabaEnUpcoming)
         {
-            await upcomingRef.DeleteAsync();
+            canal.Upcoming.TryGetValue(videoId, out var videoUpcoming);
+            canal.Upcoming.Remove(videoId);
 
             if (esEnVivo)
             {
-                _logger.LogInformation("MUDANZA: El video {VideoId} de {ChannelName} pasó a estar EN VIVO.", videoId, channelName);
+                _logger.LogInformation("MUDANZA: El video {VideoId} pasó a EN VIVO.", videoId);
             }
             else
             {
-                upcomingActuales.TryGetValue(videoId, out var videoUpcoming);
-
-                string fallbackPublished = publishedAt ?? videoUpcoming?.PublishedAt;
-                string fallbackScheduled = scheduledStart ?? videoUpcoming?.ScheduledStartTime;
-
-                var pastData = new PastVideo
+                canal.Past[videoId] = new PastVideo
                 {
                     VideoId = videoId,
                     Title = videoInfo?.Snippet?.Title ?? videoUpcoming?.Title ?? "Programación cancelada",
                     ThumbnailUrl = liveImageUrl,
                     WasPremiere = videoUpcoming?.IsPremiere ?? false,
-
-                    // Tiempos
-                    PublishedAt = fallbackPublished,
-                    ScheduledStartTime = fallbackScheduled,
+                    PublishedAt = publishedAt ?? videoUpcoming?.PublishedAt,
+                    ScheduledStartTime = scheduledStart ?? videoUpcoming?.ScheduledStartTime,
                     ActualStartTime = actualStart,
                     ActualEndTime = actualEnd ?? sysTimeNow,
                     EndedAt = sysTimeNow
                 };
-
-                await pastRef.PutAsync(pastData);
-                _logger.LogInformation("CANCELADO: El video upcoming {VideoId} de {ChannelName} se canceló y pasó a Past.", videoId, channelName);
+                _logger.LogInformation("CANCELADO: El upcoming {VideoId} se canceló y pasó a Past.", videoId);
             }
         }
-    }
 
-    private string SanitizarKeyFirebase(string key)
-    {
-        if (string.IsNullOrWhiteSpace(key)) return "UnknownChannel";
-        string keyLimpia = Regex.Replace(key, @"[.#$\[\]]", "").Trim();
-        return Uri.EscapeDataString(keyLimpia);
+        // 5. REEVALUAR PROPIEDADES LEGACY SI HUBO CAMBIOS EN VIVO
+        if (huboCambiosEnVivos)
+        {
+            if (canal.Actives.Any())
+            {
+                var streamGanador = canal.Actives.Values
+                    .OrderBy(v => v.IsPremiere)
+                    .ThenByDescending(v => v.ActualStartTime ?? v.AddedAt)
+                    .First();
+
+                canal.ChannelLive = true;
+                canal.LiveVideoId = streamGanador.VideoId;
+                canal.ChannelImgLiveUrl = streamGanador.ThumbnailUrl;
+                canal.LastActivityAt = sysTimeNow;
+                canal.IsPremiere = streamGanador.IsPremiere;
+            }
+            else
+            {
+                // Sobrevive por Legacy?
+                if (!string.IsNullOrEmpty(canal.LiveVideoId) && canal.LiveVideoId != videoId && !canal.Actives.ContainsKey(canal.LiveVideoId))
+                {
+                    canal.LastActivityAt = sysTimeNow;
+                }
+                else
+                {
+                    canal.ChannelLive = false;
+                    canal.ChannelImgLiveUrl = "";
+                    canal.LiveVideoId = "";
+                    canal.LastActivityAt = sysTimeNow;
+                    canal.IsPremiere = false;
+                }
+            }
+        }
+
+        // 6. PERSISTIR EN MONGODB (1 sola llamada atómica)
+        await _channelsCollection.ReplaceOneAsync(c => c.Id == canal.Id, canal);
+        _logger.LogInformation("El canal {ChannelName} fue actualizado con éxito en MongoDB.", canal.ChannelName);
     }
 }
 
-// --- MODELOS DE DATOS ---
-
-public class FirebaseChannel
+// --- MODELOS ---
+[BsonIgnoreExtraElements]
+public class ZappingChannel
 {
+    [BsonId]
+    [BsonRepresentation(BsonType.String)]
+    public string Id { get; set; } // Acá va el "UC..."
+
+    [BsonElement("channelName")]
     public string ChannelName { get; set; }
+
+    [BsonElement("channelDescription")]
     public string ChannelDescription { get; set; }
+
+    [BsonElement("channelCity")]
     public string ChannelCity { get; set; }
+
+    [BsonElement("channelType")]
     public string ChannelType { get; set; }
+
+    [BsonElement("channelLiveUrl")]
     public string ChannelLiveUrl { get; set; }
+
+    [BsonElement("channelImgUrl")]
     public string ChannelImgUrl { get; set; }
 
-    // Legacy
-    public string ChannelImgLiveUrl { get; set; }
-    public bool ChannelLive { get; set; }
-    public string LiveVideoId { get; set; }
+    [BsonElement("channelBannerUrl")]
+    public string ChannelBannerUrl { get; set; }
+
+    [BsonElement("lastActivityAt")]
     public string LastActivityAt { get; set; }
+
+    // Legacy
+    [BsonElement("channelLive")]
+    public bool ChannelLive { get; set; }
+
+    [BsonElement("channelImgLiveUrl")]
+    public string ChannelImgLiveUrl { get; set; }
+
+    [BsonElement("liveVideoId")]
+    public string LiveVideoId { get; set; }
+
+    [BsonElement("isPremiere")]
     public bool IsPremiere { get; set; }
 
-    // Colecciones multi-estado
+    // Dictionaries (Mongo los mapea perfecto como subdocumentos dinámicos)
+    [BsonElement("upcoming")]
     public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
+
+    [BsonElement("actives")]
     public Dictionary<string, ActiveVideo> Actives { get; set; }
+
+    [BsonElement("past")]
     public Dictionary<string, PastVideo> Past { get; set; }
 }
 
+[BsonIgnoreExtraElements]
 public class UpcomingVideo
 {
     public string VideoId { get; set; }
     public string Title { get; set; }
     public string ThumbnailUrl { get; set; }
     public bool IsPremiere { get; set; }
-
-    // Tiempos
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
     public string ActualStartTime { get; set; }
@@ -487,14 +440,13 @@ public class UpcomingVideo
     public string AddedAt { get; set; }
 }
 
+[BsonIgnoreExtraElements]
 public class ActiveVideo
 {
     public string VideoId { get; set; }
     public string Title { get; set; }
     public string ThumbnailUrl { get; set; }
     public bool IsPremiere { get; set; }
-
-    // Tiempos
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
     public string ActualStartTime { get; set; }
@@ -502,14 +454,13 @@ public class ActiveVideo
     public string AddedAt { get; set; }
 }
 
+[BsonIgnoreExtraElements]
 public class PastVideo
 {
     public string VideoId { get; set; }
     public string Title { get; set; }
     public string ThumbnailUrl { get; set; }
     public bool WasPremiere { get; set; }
-
-    // Tiempos
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
     public string ActualStartTime { get; set; }
