@@ -335,7 +335,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
             {
                 var streamGanador = vivosRestantes
                     .OrderBy(v => v.IsPremiere)
-                    .ThenByDescending(v => v.ActualStartTime)
+                    .ThenByDescending(v => v.ActualStartTime ?? v.AddedAt)
                     .First();
 
                 actualizacionParcial = new
