@@ -377,52 +377,37 @@ public class ZappingChannel
     [BsonId]
     [BsonRepresentation(BsonType.String)]
     public string Id { get; set; } // Acá va el "UC..."
-
-    [BsonElement("channelName")]
+  
     public string ChannelName { get; set; }
 
-    [BsonElement("channelDescription")]
     public string ChannelDescription { get; set; }
 
-    [BsonElement("channelCity")]
     public string ChannelCity { get; set; }
 
-    [BsonElement("channelType")]
     public string ChannelType { get; set; }
 
-    [BsonElement("channelLiveUrl")]
     public string ChannelLiveUrl { get; set; }
 
-    [BsonElement("channelImgUrl")]
     public string ChannelImgUrl { get; set; }
 
-    [BsonElement("channelBannerUrl")]
     public string ChannelBannerUrl { get; set; }
 
-    [BsonElement("lastActivityAt")]
     public string LastActivityAt { get; set; }
 
     // Legacy
-    [BsonElement("channelLive")]
     public bool ChannelLive { get; set; }
 
-    [BsonElement("channelImgLiveUrl")]
     public string ChannelImgLiveUrl { get; set; }
 
-    [BsonElement("liveVideoId")]
     public string LiveVideoId { get; set; }
 
-    [BsonElement("isPremiere")]
     public bool IsPremiere { get; set; }
 
     // Dictionaries (Mongo los mapea perfecto como subdocumentos dinámicos)
-    [BsonElement("upcoming")]
     public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
 
-    [BsonElement("actives")]
     public Dictionary<string, ActiveVideo> Actives { get; set; }
 
-    [BsonElement("past")]
     public Dictionary<string, PastVideo> Past { get; set; }
 }
 
