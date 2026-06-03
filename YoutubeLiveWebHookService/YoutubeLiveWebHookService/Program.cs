@@ -420,6 +420,7 @@ public class UpcomingVideo
     public bool IsPremiere { get; set; }
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
+    public bool ToBeCut { get; set; }
     public string ActualStartTime { get; set; }
     public string ActualEndTime { get; set; }
     public string AddedAt { get; set; }
@@ -434,6 +435,7 @@ public class ActiveVideo
     public bool IsPremiere { get; set; }
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
+    public bool ToBeCut { get; set; }
     public string ActualStartTime { get; set; }
     public string ActualEndTime { get; set; }
     public string AddedAt { get; set; }
@@ -448,6 +450,7 @@ public class PastVideo
     public bool WasPremiere { get; set; }
     public string PublishedAt { get; set; }
     public string ScheduledStartTime { get; set; }
+    public bool ToBeCut { get; set; }
     public string ActualStartTime { get; set; }
     public string ActualEndTime { get; set; }
     public string EndedAt { get; set; }
