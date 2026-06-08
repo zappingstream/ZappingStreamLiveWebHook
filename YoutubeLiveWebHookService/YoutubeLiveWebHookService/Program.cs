@@ -234,12 +234,18 @@ public class ProcesadorDeVivosBackground : BackgroundService
         // 3. GESTIONAR "ACTIVES" Y TRANSICIONES A "PAST"
         if (esEnVivo)
         {
+            // 1. Verificamos si el video ya existía en nuestros registros activos
+            canal.Actives.TryGetValue(videoId, out var videoPrevio);
+
+            // 2. Blindamos el valor: si ya existía, mantenemos lo que teníamos. Si es nuevo, usamos la lógica de YouTube.
+            bool esRealmenteEstreno = videoPrevio?.IsPremiere ?? esEstreno;
+
             canal.Actives[videoId] = new ActiveVideo
             {
                 VideoId = videoId,
                 Title = videoInfo?.Snippet?.Title ?? (esEstreno ? "Estreno en curso" : "Directo"),
                 ThumbnailUrl = liveImageUrl,
-                IsPremiere = esEstreno,
+                IsPremiere = esRealmenteEstreno,
                 PublishedAt = publishedAt,
                 ScheduledStartTime = scheduledStart,
                 ActualStartTime = actualStart ?? sysTimeNow,
