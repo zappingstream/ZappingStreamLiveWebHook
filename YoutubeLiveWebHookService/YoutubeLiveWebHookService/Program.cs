@@ -195,9 +195,8 @@ public class ProcesadorDeVivosBackground : BackgroundService
         }
         else
         {
-            // Fallback: buscar el video en los diccionarios de toda la base (menos eficiente pero a prueba de balas)
+            // Fallback limpio: buscar el video solo en los diccionarios
             canal = await _channelsCollection.Find(c =>
-                c.LiveVideoId == videoId ||
                 c.Actives.ContainsKey(videoId) ||
                 c.Upcoming.ContainsKey(videoId) ||
                 c.Past.ContainsKey(videoId)
@@ -216,12 +215,11 @@ public class ProcesadorDeVivosBackground : BackgroundService
         canal.Past ??= new Dictionary<string, PastVideo>();
 
         bool estabaEnActivos = canal.Actives.ContainsKey(videoId);
-        bool eraElVivoLegacy = canal.LiveVideoId == videoId;
         bool estabaEnUpcoming = canal.Upcoming.ContainsKey(videoId);
         bool estabaEnPast = canal.Past.ContainsKey(videoId);
 
         // ESCUDO: Actividad por VOD/Reel
-        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !eraElVivoLegacy && !estabaEnUpcoming && !estabaEnPast)
+        if (!esEnVivo && !esUpcoming && !estabaEnActivos && !estabaEnUpcoming && !estabaEnPast)
         {
             _logger.LogInformation("Escudo activado: VOD/Reel detectado en {ChannelName}. Solo actualizo actividad.", canal.ChannelName);
             var update = Builders<ZappingChannel>.Update.Set(c => c.LastActivityAt, sysTimeNow);
@@ -254,7 +252,7 @@ public class ProcesadorDeVivosBackground : BackgroundService
             };
             huboCambiosEnVivos = true;
         }
-        else if (estabaEnActivos || eraElVivoLegacy)
+        else if (estabaEnActivos)
         {
             canal.Actives.TryGetValue(videoId, out var videoActivo);
             canal.Actives.Remove(videoId);
@@ -336,38 +334,10 @@ public class ProcesadorDeVivosBackground : BackgroundService
             }
         }
 
-        // 5. REEVALUAR PROPIEDADES LEGACY SI HUBO CAMBIOS EN VIVO
+        // 5. REGISTRAR ACTIVIDAD (Reemplaza al viejo recálculo legacy)
         if (huboCambiosEnVivos)
         {
-            if (canal.Actives.Any())
-            {
-                var streamGanador = canal.Actives.Values
-                    .OrderBy(v => v.IsPremiere)
-                    .ThenByDescending(v => v.ActualStartTime ?? v.AddedAt)
-                    .First();
-
-                canal.ChannelLive = true;
-                canal.LiveVideoId = streamGanador.VideoId;
-                canal.ChannelImgLiveUrl = streamGanador.ThumbnailUrl;
-                canal.LastActivityAt = sysTimeNow;
-                canal.IsPremiere = streamGanador.IsPremiere;
-            }
-            else
-            {
-                // Sobrevive por Legacy?
-                if (!string.IsNullOrEmpty(canal.LiveVideoId) && canal.LiveVideoId != videoId && !canal.Actives.ContainsKey(canal.LiveVideoId))
-                {
-                    canal.LastActivityAt = sysTimeNow;
-                }
-                else
-                {
-                    canal.ChannelLive = false;
-                    canal.ChannelImgLiveUrl = "";
-                    canal.LiveVideoId = "";
-                    canal.LastActivityAt = sysTimeNow;
-                    canal.IsPremiere = false;
-                }
-            }
+            canal.LastActivityAt = sysTimeNow;
         }
 
         // 6. PERSISTIR EN MONGODB (1 sola llamada atómica)
@@ -383,7 +353,7 @@ public class ZappingChannel
     [BsonId]
     [BsonRepresentation(BsonType.String)]
     public string Id { get; set; } // Acá va el "UC..."
-  
+
     public string ChannelName { get; set; }
 
     public string ChannelDescription { get; set; }
@@ -399,15 +369,6 @@ public class ZappingChannel
     public string ChannelBannerUrl { get; set; }
 
     public string LastActivityAt { get; set; }
-
-    // Legacy
-    public bool ChannelLive { get; set; }
-
-    public string ChannelImgLiveUrl { get; set; }
-
-    public string LiveVideoId { get; set; }
-
-    public bool IsPremiere { get; set; }
 
     // Dictionaries (Mongo los mapea perfecto como subdocumentos dinámicos)
     public Dictionary<string, UpcomingVideo> Upcoming { get; set; }
