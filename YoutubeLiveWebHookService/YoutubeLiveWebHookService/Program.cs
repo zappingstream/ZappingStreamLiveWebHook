@@ -95,7 +95,13 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
                     {
                         logger.LogInformation("Webhook de {ChannelId}. Revisando feed RSS completo por si perdimos vivos hoy...", channelId);
                         using var httpClient = new HttpClient();
-                        var feedXml = await httpClient.GetStringAsync($"https://www.youtube.com/feeds/videos.xml?channel_id={channelId}");
+                        var response = await httpClient.GetAsync($"https://www.youtube.com/feeds/videos.xml?channel_id={channelId}");
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            logger.LogWarning("Feed RSS no disponible para {ChannelId} (Status: {StatusCode})", channelId, response.StatusCode);
+                            return;
+                        }
+                        var feedXml = await response.Content.ReadAsStringAsync();
                         var feedDoc = XDocument.Parse(feedXml);
                         XNamespace atom = "http://www.w3.org/2005/Atom";
 
@@ -142,6 +148,7 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
     return Results.StatusCode(405);
 });
 
+app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok("Zapping Streaming Webhook is running."));
 
 app.Run();
 
