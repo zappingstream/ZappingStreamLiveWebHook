@@ -10,6 +10,15 @@ using System.Xml.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Apagar reloadOnChange para no consumir instancias de inotify en Linux (Render)
+builder.Host.ConfigureAppConfiguration((hostingContext, config) =>
+{
+    foreach (var source in config.Sources.OfType<Microsoft.Extensions.Configuration.Json.JsonConfigurationSource>())
+    {
+        source.ReloadOnChange = false;
+    }
+});
+
 // 1. CONFIGURACIONES
 string mongoUri = builder.Configuration["MongoDB:ConnectionString"] ?? "mongodb+srv://...";
 string dbName = builder.Configuration["MongoDB:DatabaseName"] ?? "ZappingStreaming";
@@ -57,15 +66,45 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
             var xdoc = XDocument.Parse(xmlBody);
             XNamespace yt = "http://www.youtube.com/xml/schemas/2015";
 
-            var videoIdElements = xdoc.Descendants(yt + "videoId").ToList();
             var channelIdElement = xdoc.Descendants(yt + "channelId").FirstOrDefault();
             string channelId = channelIdElement?.Value ?? "";
 
-            foreach (var videoIdElement in videoIdElements)
+            // Le avisamos a YouTube inmediatamente que recibimos el aviso
+            // Y en segundo plano (para no bloquear) descargamos el feed RSS completo del canal
+            if (!string.IsNullOrEmpty(channelId))
             {
-                string videoId = videoIdElement.Value;
-                logger.LogInformation("¡Aviso recibido! ID: {VideoId}. Mandando a la cola...", videoId);
-                await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        logger.LogInformation("Webhook de {ChannelId}. Revisando feed RSS completo por si perdimos vivos hoy...", channelId);
+                        using var httpClient = new HttpClient();
+                        var feedXml = await httpClient.GetStringAsync($"https://www.youtube.com/feeds/videos.xml?channel_id={channelId}");
+                        var feedDoc = XDocument.Parse(feedXml);
+                        XNamespace atom = "http://www.w3.org/2005/Atom";
+                        
+                        var today = DateTime.UtcNow.Date;
+                        var entries = feedDoc.Descendants(atom + "entry");
+
+                        foreach (var entry in entries)
+                        {
+                            var publishedStr = entry.Element(atom + "published")?.Value;
+                            if (DateTime.TryParse(publishedStr, out var publishedDate) && publishedDate.ToUniversalTime().Date == today)
+                            {
+                                var feedVideoId = entry.Element(yt + "videoId")?.Value;
+                                if (!string.IsNullOrEmpty(feedVideoId))
+                                {
+                                    logger.LogInformation("Encontrado video de hoy en RSS: {VideoId}. Mandando a la cola...", feedVideoId);
+                                    await escritorCola.WriteAsync(new VideoEvent(feedVideoId, channelId));
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        logger.LogError(e, "Error al leer feed RSS de {ChannelId}", channelId);
+                    }
+                });
             }
         }
         catch (Exception ex)
