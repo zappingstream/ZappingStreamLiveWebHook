@@ -142,7 +142,6 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
     return Results.StatusCode(405);
 });
 
-app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok("Zapping Streaming Webhook is running."));
 
 app.Run();
 
