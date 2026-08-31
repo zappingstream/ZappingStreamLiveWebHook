@@ -57,14 +57,13 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
             var xdoc = XDocument.Parse(xmlBody);
             XNamespace yt = "http://www.youtube.com/xml/schemas/2015";
 
-            var videoIdElement = xdoc.Descendants(yt + "videoId").FirstOrDefault();
+            var videoIdElements = xdoc.Descendants(yt + "videoId").ToList();
             var channelIdElement = xdoc.Descendants(yt + "channelId").FirstOrDefault();
+            string channelId = channelIdElement?.Value ?? "";
 
-            if (videoIdElement != null)
+            foreach (var videoIdElement in videoIdElements)
             {
                 string videoId = videoIdElement.Value;
-                string channelId = channelIdElement?.Value ?? "";
-
                 logger.LogInformation("¡Aviso recibido! ID: {VideoId}. Mandando a la cola...", videoId);
                 await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
             }
