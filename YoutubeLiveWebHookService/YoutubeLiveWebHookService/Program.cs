@@ -66,16 +66,30 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
             var xdoc = XDocument.Parse(xmlBody);
             XNamespace yt = "http://www.youtube.com/xml/schemas/2015";
 
-            var videoIdElements = xdoc.Descendants(yt + "videoId").ToList();
+            XNamespace atom = "http://www.w3.org/2005/Atom";
             var channelIdElement = xdoc.Descendants(yt + "channelId").FirstOrDefault();
             string channelId = channelIdElement?.Value ?? "";
 
             // 1. Encolamos el video exacto que nos manda YouTube en esta notificación
-            foreach (var videoIdElement in videoIdElements)
+            var webhookEntries = xdoc.Descendants(atom + "entry");
+            foreach (var entry in webhookEntries)
             {
-                string videoId = videoIdElement.Value;
-                logger.LogInformation("¡Aviso directo recibido! ID: {VideoId}. Mandando a la cola...", videoId);
-                await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
+                var linkElement = entry.Elements(atom + "link").FirstOrDefault(l => l.Attribute("rel")?.Value == "alternate");
+                string linkHref = linkElement?.Attribute("href")?.Value ?? "";
+
+                if (linkHref.Contains("/shorts/"))
+                {
+                    logger.LogInformation("Ignorando Short del webhook directo: {Url}", linkHref);
+                    continue; // Filtramos el short
+                }
+
+                var videoIdElement = entry.Element(yt + "videoId");
+                if (videoIdElement != null)
+                {
+                    string videoId = videoIdElement.Value;
+                    logger.LogInformation("¡Aviso directo recibido! ID: {VideoId}. Mandando a la cola...", videoId);
+                    await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
+                }
             }
 
             // 2. Le avisamos a YouTube inmediatamente que recibimos el aviso
@@ -97,13 +111,21 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
 
                         foreach (var entry in entries)
                         {
+                            var linkElement = entry.Elements(atom + "link").FirstOrDefault(l => l.Attribute("rel")?.Value == "alternate");
+                            string linkHref = linkElement?.Attribute("href")?.Value ?? "";
+
+                            if (linkHref.Contains("/shorts/"))
+                            {
+                                continue; // Filtramos los shorts del RSS
+                            }
+
                             var publishedStr = entry.Element(atom + "published")?.Value;
                             if (DateTime.TryParse(publishedStr, out var publishedDate) && publishedDate.ToUniversalTime().Date == today)
                             {
                                 var feedVideoId = entry.Element(yt + "videoId")?.Value;
                                 if (!string.IsNullOrEmpty(feedVideoId))
                                 {
-                                    logger.LogInformation("Encontrado video de hoy en RSS: {VideoId}. Mandando a la cola...", feedVideoId);
+                                    logger.LogInformation("Encontrado video de hoy en RSS (no short): {VideoId}. Mandando a la cola...", feedVideoId);
                                     await escritorCola.WriteAsync(new VideoEvent(feedVideoId, channelId));
                                 }
                             }
