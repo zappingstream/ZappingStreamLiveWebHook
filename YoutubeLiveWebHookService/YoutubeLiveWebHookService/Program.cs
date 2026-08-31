@@ -10,14 +10,7 @@ using System.Xml.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Apagar reloadOnChange para no consumir instancias de inotify en Linux (Render)
-builder.Host.ConfigureAppConfiguration((hostingContext, config) =>
-{
-    foreach (var source in config.Sources.OfType<Microsoft.Extensions.Configuration.Json.JsonConfigurationSource>())
-    {
-        source.ReloadOnChange = false;
-    }
-});
+
 
 // 1. CONFIGURACIONES
 string mongoUri = builder.Configuration["MongoDB:ConnectionString"] ?? "mongodb+srv://...";
