@@ -66,11 +66,20 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
             var xdoc = XDocument.Parse(xmlBody);
             XNamespace yt = "http://www.youtube.com/xml/schemas/2015";
 
+            var videoIdElements = xdoc.Descendants(yt + "videoId").ToList();
             var channelIdElement = xdoc.Descendants(yt + "channelId").FirstOrDefault();
             string channelId = channelIdElement?.Value ?? "";
 
-            // Le avisamos a YouTube inmediatamente que recibimos el aviso
-            // Y en segundo plano (para no bloquear) descargamos el feed RSS completo del canal
+            // 1. Encolamos el video exacto que nos manda YouTube en esta notificación
+            foreach (var videoIdElement in videoIdElements)
+            {
+                string videoId = videoIdElement.Value;
+                logger.LogInformation("¡Aviso directo recibido! ID: {VideoId}. Mandando a la cola...", videoId);
+                await escritorCola.WriteAsync(new VideoEvent(videoId, channelId));
+            }
+
+            // 2. Le avisamos a YouTube inmediatamente que recibimos el aviso
+            // Y en segundo plano (para no bloquear) descargamos el feed RSS completo del canal como respaldo
             if (!string.IsNullOrEmpty(channelId))
             {
                 _ = Task.Run(async () =>
