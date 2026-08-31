@@ -105,7 +105,7 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
                         var feedXml = await httpClient.GetStringAsync($"https://www.youtube.com/feeds/videos.xml?channel_id={channelId}");
                         var feedDoc = XDocument.Parse(feedXml);
                         XNamespace atom = "http://www.w3.org/2005/Atom";
-                        
+
                         var today = DateTime.UtcNow.Date;
                         var entries = feedDoc.Descendants(atom + "entry");
 
@@ -148,6 +148,8 @@ app.MapMethods("/webhook", new[] { "GET", "POST" }, async (HttpContext context, 
 
     return Results.StatusCode(405);
 });
+
+app.MapMethods("/", new[] { "GET", "HEAD" }, () => Results.Ok("Zapping Streaming Webhook is running."));
 
 app.Run();
 
